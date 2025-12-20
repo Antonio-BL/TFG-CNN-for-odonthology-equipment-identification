@@ -1,0 +1,13 @@
+name: env_TFG
+channels:
+  - defaults
+dependencies:
+  - python=3.13
+  - numpy
+  - pandas
+  - opencv
+  - scikit-image
+  - matplotlib
+  - seaborn
+  - pytorch
+  - jupyter
