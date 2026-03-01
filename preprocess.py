@@ -38,7 +38,7 @@ if platform.system() == "Linux":
 # ----------------------------------------- #
 @dataclass
 class PreprocessConfig:
-    image_dims: tuple[int, int] = (244, 244)
+    image_dims: tuple[int, int] = (4284, 5712)
     color_filter_tolerance: float = 0.5
     crop_filter_tolerance: float = 0.17
     open_kernel_dims: tuple[int, int]= (3, 3)
@@ -272,19 +272,18 @@ def main():
     tray_image = load_images(trays_directory, cfg) 
     print(f"{int(np.shape(tray_image)[0]) + 1} images loaded. \n")
 
-    area_data = get_centered_patch(tray_image[0], cfg); 
+    debug_img = tray_image[np.random.randint(low=0, high=len(tray_image))]
+    cv.imshow("Original debug image",debug_img)
+    cv.waitKey(0)
+    cv.destroyAllWindows()
+
+
+    area_data = get_centered_patch(debug_img, cfg); 
     print(area_data)
-
-    # cv.rectangle(tray_image[0], area_data["vortex0"], area_data["vortex1"], (125,0,0), 5)
-    # cv.imshow("img0",tray_image[0])
-    # cv.waitKey()
-
-    # cv.imshow("2", area_data["patch"])
-    # cv.waitKey()
-
+    
     avg_color = get_avg_color( area_data["patch"], cfg)
 
-    crop_image(tray_image[0], cfg)
+    crop_image(debug_img, cfg)
 
     return
 
