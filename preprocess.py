@@ -1,18 +1,15 @@
-# This progrram tes the files containing trays with multiple tools and extracts all 
-# the tools as iividual images, that will be then given to CNN for classification.
-# The tools usedill be classical segmnentation tools, without using any ML or DL methods. 
+# Loads and preprocess images before segmentation.
+#   1. Load Images in RGB format:                           load_images
+#   2. Get the working area (ROI) based on background       get_ROI_from_color
+#   3. Get the edges of the image                           edge_Laplace
+#   4. Binarizes the image                                  binarize_image
 
-# cfg parameters may be passed by some other script or webapp
-
-# %% Dependencies Import
-
-# ----------------------------------------- #
-# Basic dependencies                        #
-# ----------------------------------------- #
+# ================================================================== #
+# Basic dependencies                                                 #
+# ================================================================== #
 import os
 import platform 
-from typing import Optional, Iterable
-
+from typing import Optional
 import numpy as np 
 import pandas as pd 
 
@@ -20,37 +17,48 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 from dataclasses import dataclass
-# ----------------------------------------- #
-# Image processing dependencies             #
-# ----------------------------------------- #
+# ================================================================== #
+# Image processing dependencies                                      #
+# ================================================================== #
 import cv2 as cv
 from scipy.signal import convolve2d
 
-# ----------------------------------------- #
-# Linux support                             #
-# ----------------------------------------- #
+# ================================================================== #
+# Linux support                                                      #
+# ================================================================== #
 # force x11
 if platform.system() == "Linux":
     os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
-# ----------------------------------------- #
-#  Preprocess Configuration class           # 
-# ----------------------------------------- #
+# ================================================================== #
+#  Preprocess Configuration class                                    # 
+# ================================================================== #
 @dataclass
 class PreprocessConfig:
-    image_dims: tuple[int, int] = (4284, 5712)
-    color_filter_tolerance: float = 0.5
-    crop_filter_tolerance: float = 0.17
-    open_kernel_dims: tuple[int, int]= (3, 3)
-    close_kernel_dims: tuple[int, int]= (20, 20)
-    patch_center: int = None
-    patch_size: int = 10
+    # General
+    image_dims: tuple[int, int] = (4284, 5712)                              # Image dimensions during preprocessing (resolution)
+    open_kernel_dims: tuple[int, int]= (3, 3)                               # Dimensions of the kernel for morphological open                          
+    close_kernel_dims: tuple[int, int]= (20, 20)                            # Dimensions of the kernel for morphological open
+    
+    # filtering parameters for ALL color filtering actions
+    color_filter_method: str = "rgb"                                        # Color system used in the filtering: rgb | hsv
+    color_filter_tolerance_rgb: float = 0.5                                 # Tolerance for the filtering using rgb colors
+    color_filter_tolerance_hsv: float = 0.15                                # Tolerance for the filtering using hsv colors
+  
+    # Patch dimensions
+    patch_center: int = None                                                # Center around which to get a patch of the image
+    patch_size: int = 10                                                    # Length of the sides of the patch
 
-# ----------------------------------------- #
-# Helper functions                          #
-# ----------------------------------------- #
+    # ROI detection parameters
+    ROI_background_color: tuple[int, int, int] = (30, 90, 170)              # Color of the background of the area of interest in RGB (usually blue). 
+    roi_padding: int = 30                                                   # Padding around clusters
+    roi_min_area_ratio: float = 0.03                                        # Minimum valid cluster size as a percentage of the image area (default 3% of the total image area)           
+    roi_open_kernel_dims: tuple[int, int] = (7, 7)                          # Dimensions of the kernel for morphological open after ROI                         
+    roi_close_kernel_dims: tuple[int, int] = (21, 21)                       # Dimensions of the kernel for morphological close after ROI
 
-# Loads images
+# ================================================================== #
+# Helper functions : used in preprocessing and in segmentation       #
+# ================================================================== #
 def load_images(path: str, cfg: PreprocessConfig) -> list[np.ndarray]:
     '''
     Reads images in specified directories and loads them in an array.
@@ -70,6 +78,7 @@ def load_images(path: str, cfg: PreprocessConfig) -> list[np.ndarray]:
         for f in file:
             img_path = os.path.join(working_directory, f)
             img= cv.imread(img_path)
+            img = cv.cvtColor(img, cv.COLOR_BGR2RGB)
             if img is None:
                 print(f" Warning: Image {img_path} has been skipped: It is empty \n")
                 continue
@@ -78,91 +87,6 @@ def load_images(path: str, cfg: PreprocessConfig) -> list[np.ndarray]:
             images.append(img)
                
     return images
-
-# ----------------------------------------- #
-# Image manipulation functions              #a: int =
-# ----------------------------------------- #
-def get_centered_patch(image: np.ndarray, cfg: PreprocessConfig) -> dict:
-    '''
-    Calculates de center area within a RGB image.
-    Args: 
-        image: RGB image.
-        cfg: configuration Parameters
-    Returns: 
-        Dictionary containing the area data.
-            - patch: np.ndarray containing the area.
-            - vortex0: one vortex of the area.
-            - vortex1: opposite vortex to vortex0.
-    '''
-    
-    [img_height, img_width ] = np.shape(image)[0:2]
-
-    if cfg.patch_center is None:
-        center = np.array([img_width // 2, img_height // 2], dtype=int)  # (x, y)
-    else:
-        center = np.array(cfg.patch_center, dtype=int)
-   
-    # define area to get color as 10% 
-    area_size = cfg.patch_size / 100; 
-    area = (np.array(np.multiply([img_width, img_height], area_size))).astype(int)
-    
-    # get averages of each R G B color for the image
-    x0 = max(center[0] - area[0] // 2, 0)
-    x1 = min(center[0] + area[0] // 2, img_width)
-    y0 = max(center[1] - area[1] // 2, 0)
-    y1 = min(center[1] + area[1] // 2, img_height)
-
-    img_patch = image[y0:y1, x0:x1]
-
-    area_data = {
-        "patch" : np.array(img_patch),
-        "vortex0" : np.array([x0,y0]).astype(int),
-        "vortex1" : np.array([x1,y1]).astype(int), 
-    }
-    return area_data
-
-
-def get_avg_color(colored_area: np.ndarray, cfg: PreprocessConfig) -> np.ndarray:
-    '''
-    Gets the average color of an image. Using a custom method.
-    Args: 
-        colored_area: image to get the average color of.
-        cfg: Configuration parameters
-    Returns: 
-        avg_color: np.ndarray containing the average color in RGB
-    '''
-    assert colored_area is not None, "No colored_area given"
-    assert len(np.array(colored_area).shape) == 3, f"colored_area is not properly shaped: Expected [x, y, 3], received [x, y, {len(colored_area.shape)}]"
-
-    # Get layers of image
-    red_layer = colored_area[:,:, 2]
-    green_layer = colored_area[:,:, 1]
-    blue_layer = colored_area[:,:, 0] 
-
-    # get average intensity of each layer: 
-    bgr_intenisty = np.array([np.mean(blue_layer), np.mean(green_layer), np.mean(red_layer)])
-    highest_intenisty_mask = np.array([bgr_intenisty >= np.max(bgr_intenisty)])
-    highest_intenisty_layer = int(np.flatnonzero(highest_intenisty_mask))
-
-    # gets pixel_mask for image for highest intensity 
-    threshold = cfg.color_filter_tolerance * np.max(colored_area[:,:, highest_intenisty_layer])
-    colored_area_layer = colored_area[:, :, highest_intenisty_layer]
-    colored_area_mask = np.array(colored_area_layer >= threshold)
-
-
-    # Apply mask
-    filtered = np.zeros_like(colored_area)
-    filtered[colored_area_mask] = colored_area[colored_area_mask]
-
-  # cv.imshow("filtered_area", filtered)
-  # cv.waitKey(0)
-  # cv.destroyAllWindows()
-
-    # Compute average color of the masked pixels
-    avg_color = colored_area[colored_area_mask].reshape(-1, 3).mean(axis=0)
-    avg_color = avg_color[-1::-1].astype(int)
-
-    return avg_color
 
 def edge_Laplace(image: np.array ) -> np.ndarray:
     '''
@@ -180,113 +104,269 @@ def edge_Laplace(image: np.array ) -> np.ndarray:
 
     return edges_image
 
-def crop_image(image: np.ndarray, cfg: PreprocessConfig) -> np.ndarray:
-    ''' 
-    Crops the image automatically,  based on the average color taken in the center of the image.
-    It assumes that the image is accurately centered.
-    Args: 
-        - image: image to be cropped
-        - filter sensitivity: how sensitive it is going to be to color changes when delimiting the area to be cropped.
-        - morph_kernel_dims: tuple of length 4 first 2 elements contains the dimensions of the structural element for the morphological opening of the image. ;ast 2 elements for the morph. close
-    Returns: 
-        - cropped_image: cropped image
-    '''
-    assert image is not None, "No image given"
-    assert cfg.crop_filter_tolerance >= 0 and cfg.crop_filter_tolerance <= 1, "filter_tolerance has to be in range  [0, 1]"
+def open_close_cleanup(image: np.ndarray, cfg: PreprocessConfig) -> np.ndarray: 
+    """
+    Applies morphological opening and then close to clean up the iamge from possible noise.
+    Uses the defined opening and closing kernels.
+    Arguments: 
+        image: np.ndarray, image to be filtered. RGB format.
+        cfg: Configuration parameters.
+    Returns:
+        cleaned_image: np.ndarray image after closing and opening.
+    """
+    open_kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.roi_open_kernel_dims)
+    close_kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.roi_close_kernel_dims)
 
-    # get the color to filter by, returns in RGB
-    filter_color = get_avg_color(get_centered_patch(image, cfg)["patch"], cfg)
+    cleaned_image = cv.morphologyEx(image, cv.MORPH_OPEN, open_kernel)
+    cleaned_image = cv.morphologyEx(image, cv.MORPH_CLOSE, close_kernel)
 
-    # define range of color based on filter tolerance
-    red_min = filter_color[0] * (1 - cfg.crop_filter_tolerance);    red_max = filter_color[0] * (1 + cfg.crop_filter_tolerance)
-    green_min = filter_color[1] *(1 - cfg.crop_filter_tolerance);  green_max = filter_color[1] * (1 + cfg.crop_filter_tolerance)
-    blue_min = filter_color[2] * (1 - cfg.crop_filter_tolerance);   blue_max = filter_color[2] * (1 + cfg.crop_filter_tolerance)
+    return cleaned_image
+# ================================================================== #
+# Image information functions                                        #
+# ================================================================== #
 
-    # define color layers
-    red_layer = image[:, :, 2]
-    green_layer = image[:, :, 1]
-    blue_layer = image[:, :, 0]
 
-    # filter image based on color 
-    filter_mask = (
-        (red_layer >= red_min) & (red_layer <= red_max) &
-        (green_layer >= green_min) & (green_layer <= green_max) &
-        (blue_layer >= blue_min) & (blue_layer <= blue_max)
+def get_ROI_from_color(image: np.ndarray, cfg: PreprocessConfig): 
+    """
+    Detect the ROI corresponding to the paper/tray background using the reference
+    color stored in cfg.ROI_background_color.
+    Uses HSV
+
+    Args:
+        image: RGB image, shape (H, W, 3)
+        cfg: PreprocessConfig
+
+    Returns:
+        roi_crop: cropped RGB image containing the ROI
+        roi_mask: binary mask uint8(H, W), ROI region = 255
+        roi_bbox: tuple (x, y, w, h)
+    """
+    assert image is not None, "image is None"
+    assert image.ndim == 3 and image.shape[2] == 3, (
+        f"Expected RGB image (H,W,3), got shape {image.shape}"
     )
 
-    filtered_image = np.zeros_like(image)
-    filtered_image[filter_mask] = image[filter_mask]
+    H_img, W_img = image.shape[:2]
 
-    if DEBUGGING:
-        cv.imshow("window",filtered_image); cv.waitKey()
+    # 1) Build background mask from cfg.ROI_background_color
+    # ---------------------------------------------------------
+    bg_rgb = np.asarray(cfg.ROI_background_color, dtype=np.uint8).reshape(1, 1, 3)
 
-    # define morphological structures for opening and closing image
-    open_kernel = cv.getStructuringElement(cv.MORPH_RECT, cfg.open_kernel_dims)
-    close_kernel = cv.getStructuringElement(cv.MORPH_RECT, cfg.close_kernel_dims)
+    # HSV method
+    if cfg.color_filter_method.lower().strip() == "hsv":
+        image_hsv = cv.cvtColor(image, cv.COLOR_RGB2HSV)
+        bg_hsv = cv.cvtColor(bg_rgb, cv.COLOR_RGB2HSV).reshape(3,)
 
-    # apply open and close to the image
-    opened_image = cv.morphologyEx(filtered_image, cv.MORPH_OPEN, open_kernel)
-    closed_image = cv.morphologyEx(opened_image, cv.MORPH_CLOSE, close_kernel)
+        H0, S0, V0 = bg_hsv.astype(np.int32)
+        tol = float(cfg.color_filter_tolerance)
 
-    # binarize image
-    gray_image = cv.cvtColor(closed_image, cv.COLOR_BGR2GRAY)
-    thresh, binarized = cv.threshold(gray_image, None, 255, cv.THRESH_OTSU)     
-    
-    # get edges
-    edges_image = edge_Laplace(binarized)
+        dH = int(179 * tol)
+        dS = int(255 * tol)
+        dV = int(255 * tol)
+
+        s_low = max(S0 - dS, 0)
+        s_up  = min(S0 + dS, 255)
+        v_low = max(V0 - dV, 0)
+        v_up  = min(V0 + dV, 255)
+
+        h_low = H0 - dH
+        h_up  = H0 + dH
+
+        # Hue wrap-around
+        if h_low < 0 or h_up > 179:
+            lowerA = np.array([0, s_low, v_low], dtype=np.uint8)
+            upperA = np.array([min(h_up, 179), s_up, v_up], dtype=np.uint8)
+            maskA = cv.inRange(image_hsv, lowerA, upperA)
+
+            lowerB = np.array([max(h_low + 180, 0), s_low, v_low], dtype=np.uint8)
+            upperB = np.array([179, s_up, v_up], dtype=np.uint8)
+            maskB = cv.inRange(image_hsv, lowerB, upperB)
+
+            bg_mask = cv.bitwise_or(maskA, maskB)
+        else:
+            lower = np.array([h_low, s_low, v_low], dtype=np.uint8)
+            upper = np.array([h_up, s_up, v_up], dtype=np.uint8)
+            bg_mask = cv.inRange(image_hsv, lower, upper)
+
+    # RGB method
+    else:
+        ref = bg_rgb.reshape(3,).astype(np.float32)
+        tol = float(cfg.color_filter_tolerance)
+        delta = np.array([255.0, 255.0, 255.0], dtype=np.float32) * tol
+
+        lower = np.clip(ref - delta, 0, 255).astype(np.uint8)
+        upper = np.clip(ref + delta, 0, 255).astype(np.uint8)
+
+        bg_mask = cv.inRange(image, lower, upper)
 
 
-    contours, hierarchy = cv.findContours(binarized, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
+    # 2) Morphological cleanup on background mask
+    # ---------------------------------------------------------
+    bg_mask = open_close_cleanup(bg_mask, cfg)
 
-    if DEBUGGING:
-        plt.figure()
-        for cnt in contours:
-            pts = cnt.squeeze()  # contour returns points in [[x, y]] --> [x, y]
-            if pts.ndim != 2:
-                continue  # skip weird contours
-            xs = pts[:, 0]
-            ys = pts[:, 1]
-            plt.scatter(xs, ys, s=1)  # s small so it doesn’t look like blobs
-        plt.gca().invert_yaxis()
-        plt.title("Contour points")
-        plt.show()
+    # 3) Keep only the largest connected component
+    # ---------------------------------------------------------
+    num_labels, labels, stats, _ = cv.connectedComponentsWithStats(bg_mask, connectivity=8)
 
-    all_contours = np.concatenate(contours)
+    if num_labels <= 1:
+        raise ValueError("No ROI background region detected.")
 
-    if DEBUGGING:
-        print(contours)
-        x_bounding, y_bounding, w_bounding, h_bounding = cv.boundingRect(all_contours)
-        cv.drawContours(binarized, all_contours, -1, (255, 0, 0), thickness=3 )
-        cv.imshow("contours", binarized); cv.waitKey(0)
+    min_area = int(cfg.roi_min_area_ratio * H_img * W_img)
 
-    cropped_image = None
-    return cropped_image
+    best_label = None
+    best_area = -1
+
+    for lbl in range(1, num_labels):
+        area = stats[lbl, cv.CC_STAT_AREA]
+        if area >= min_area and area > best_area:
+            best_area = area
+            best_label = lbl
+
+    if best_label is None:
+        raise ValueError(
+            f"No ROI component large enough. Try reducing roi_min_area_ratio "
+            f"or increasing color_filter_tolerance."
+        )
+
+    roi_mask = np.zeros_like(bg_mask)
+    roi_mask[labels == best_label] = 255
+
+    # Optional extra closing after selecting the component
+    roi_mask = cv.morphologyEx(roi_mask, cv.MORPH_CLOSE, close_kernel)
+
+    # 4) Bounding box + padding
+    # ---------------------------------------------------------
+    x, y, w, h = cv.boundingRect(cv.findNonZero(roi_mask))
+
+    pad = int(cfg.roi_padding)
+    x0 = max(0, x - pad)
+    y0 = max(0, y - pad)
+    x1 = min(W_img, x + w + pad)
+    y1 = min(H_img, y + h + pad)
+
+    roi_crop = image[y0:y1, x0:x1]
+    roi_bbox = (x0, y0, x1 - x0, y1 - y0)
+
+    return roi_crop, roi_mask, roi_bbox
+
+
+
+def binarize_image(image: np.ndarray, cfg: PreprocessConfig, filter_array: Optional[np.ndarray]=None) -> np.ndarray:
+    '''
+    Filters the image to obtain a binarized image by using color. Can filter in RGB color system and HSV.
+
+    Args:
+        image: np.ndarray, image to be filtered. RGB format.
+        cfg: Configuration parameters.
+        filter_array: array containing the filter reference values (RGB or HSV depending on method).
+                      If None, it is computed from the average color of a centered patch.
+    Returns:
+        filtered_image: np.ndarray uint8(H, W) containing the binarized mask (tool=255, background=0).
+    '''
+    # Initialize values and read arguments
+    valid_methods = ["hsv", "rgb"]
+    filtered_image = image  # will be overwritten with the final binary mask
+    filter_method = cfg.color_filter_method.lower().strip()
+
+    # --- Get reference color if not provided ---
+    if filter_array is None:
+        patch_dict = get_centered_patch(image=image, cfg=cfg)
+        patch = patch_dict["patch"]
+        filter_array = get_avg_color(patch, cfg=cfg)  # typically returns RGB (3,)
+
+        # If HSV filtering is selected, convert the reference from RGB -> HSV
+        if filter_method == "hsv":
+            ref_rgb = np.asarray(filter_array, dtype=np.uint8).reshape(1, 1, 3)
+            filter_array = cv.cvtColor(ref_rgb, cv.COLOR_RGB2HSV).reshape(3,)
+
+    # --- Validate method ---
+    assert filter_method in valid_methods, (
+        f"Method {cfg.color_filter_method} not recognized: choose between HSV or RGB \n"
+    )
+
+    # --- Validate filter_array shape ---
+    # Accept (3,), (3,1) or (1,3) and normalize to (3,)
+    filter_array = np.asarray(filter_array).reshape(-1)
+    assert filter_array.size == 3, f"filter_array must contain 3 values, got shape {np.asarray(filter_array).shape}"
+
+    tol = float(cfg.color_filter_tolerance)
+
+    # --- Build mask of background pixels close to reference color ---
+    if filter_method == "rgb":
+        # filter_array is [R,G,B] in [0..255]
+        ref = filter_array.astype(np.float32)
+        delta = np.array([255.0, 255.0, 255.0], dtype=np.float32) * tol
+
+        lower = np.clip(ref - delta, 0, 255).astype(np.uint8)
+        upper = np.clip(ref + delta, 0, 255).astype(np.uint8)
+
+        mask_bg = cv.inRange(image, lower, upper)
+
+    else:  # hsv
+        # filter_array is [H,S,V] where H in [0..179], S,V in [0..255]
+        image_hsv = cv.cvtColor(image, cv.COLOR_RGB2HSV)
+
+        H, S, V = filter_array.astype(np.int32)
+        dH = int(179 * tol)
+        dS = int(255 * tol)
+        dV = int(255 * tol)
+
+        s_low = max(S - dS, 0)
+        s_up  = min(S + dS, 255)
+        v_low = max(V - dV, 0)
+        v_up  = min(V + dV, 255)
+
+        h_low = H - dH
+        h_up  = H + dH
+
+        # Hue is circular -> handle wrap-around by combining two ranges if needed
+        if h_low < 0 or h_up > 179:
+            lowerA = np.array([0, s_low, v_low], dtype=np.uint8)
+            upperA = np.array([min(h_up, 179), s_up, v_up], dtype=np.uint8)
+            maskA = cv.inRange(image_hsv, lowerA, upperA)
+
+            lowerB = np.array([max(h_low + 180, 0), s_low, v_low], dtype=np.uint8)
+            upperB = np.array([179, s_up, v_up], dtype=np.uint8)
+            maskB = cv.inRange(image_hsv, lowerB, upperB)
+
+            mask_bg = cv.bitwise_or(maskA, maskB)
+        else:
+            lower = np.array([h_low, s_low, v_low], dtype=np.uint8)
+            upper = np.array([h_up,  s_up,  v_up], dtype=np.uint8)
+            mask_bg = cv.inRange(image_hsv, lower, upper)
+
+    # --- Invert so that tools/foreground are white (255) ---
+    filtered_image = cv.bitwise_not(mask_bg)
+
+    # --- Morphological cleanup ---
+    open_kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.open_kernel_dims)
+    close_kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.close_kernel_dims)
+
+    filtered_image = cv.morphologyEx(filtered_image, cv.MORPH_OPEN, open_kernel)
+    filtered_image = cv.morphologyEx(filtered_image, cv.MORPH_CLOSE, close_kernel)
+
+    return filtered_image
+
 # %% Main ----------------------------------------------------------
 def main():
 
     # Load default config
     cfg = PreprocessConfig()
 
-    # load images of the trays
-    trays_directory =(r"C:\Users\Antonio\Documents\GITI\TFG\Trays")
-    tray_image = load_images(trays_directory, cfg) 
-    print(f"{int(np.shape(tray_image)[0]) + 1} images loaded. \n")
+    # Load images of the trays
+    trays_directory = (r"C:\Users\Antonio\Documents\GITI\TFG\Trays")
+    tray_image = load_images(trays_directory, cfg)
+    print(f"{len(tray_image)} images loaded.\n")
 
+    # Select random image from folder to debug code
     debug_img = tray_image[np.random.randint(low=0, high=len(tray_image))]
-    cv.imshow("Original debug image",debug_img)
-    cv.waitKey(0)
-    cv.destroyAllWindows()
 
-
-    area_data = get_centered_patch(debug_img, cfg); 
-    print(area_data)
-    
-    avg_color = get_avg_color( area_data["patch"], cfg)
-
-    crop_image(debug_img, cfg)
+    # NOTE: debug_img is RGB (because load_images converts BGR -> RGB)
+    img_rgb = debug_img
 
     return
 
+# -------------------------------------------------------------------------
 if __name__ == "__main__":
     DEBUGGING = True
     main()
