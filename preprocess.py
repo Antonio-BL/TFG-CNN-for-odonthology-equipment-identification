@@ -118,13 +118,12 @@ def open_close_cleanup(image: np.ndarray, cfg: PreprocessConfig) -> np.ndarray:
     close_kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.roi_close_kernel_dims)
 
     cleaned_image = cv.morphologyEx(image, cv.MORPH_OPEN, open_kernel)
-    cleaned_image = cv.morphologyEx(image, cv.MORPH_CLOSE, close_kernel)
+    cleaned_image = cv.morphologyEx(cleaned_image, cv.MORPH_CLOSE, close_kernel)
 
     return cleaned_image
 # ================================================================== #
 # Image information functions                                        #
 # ================================================================== #
-
 
 def get_ROI_from_color(image: np.ndarray, cfg: PreprocessConfig): 
     """
@@ -204,7 +203,7 @@ def get_ROI_from_color(image: np.ndarray, cfg: PreprocessConfig):
     # ---------------------------------------------------------
     bg_mask = open_close_cleanup(bg_mask, cfg)
 
-    # 3) Keep only the largest connected component
+    # 3) Keep only the largest connected component: Clustering
     # ---------------------------------------------------------
     num_labels, labels, stats, _ = cv.connectedComponentsWithStats(bg_mask, connectivity=8)
 
@@ -232,6 +231,7 @@ def get_ROI_from_color(image: np.ndarray, cfg: PreprocessConfig):
     roi_mask[labels == best_label] = 255
 
     # Optional extra closing after selecting the component
+    close_kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.roi_close_kernel_dims)
     roi_mask = cv.morphologyEx(roi_mask, cv.MORPH_CLOSE, close_kernel)
 
     # 4) Bounding box + padding
@@ -248,8 +248,6 @@ def get_ROI_from_color(image: np.ndarray, cfg: PreprocessConfig):
     roi_bbox = (x0, y0, x1 - x0, y1 - y0)
 
     return roi_crop, roi_mask, roi_bbox
-
-
 
 def binarize_image(image: np.ndarray, cfg: PreprocessConfig, filter_array: Optional[np.ndarray]=None) -> np.ndarray:
     '''
@@ -289,10 +287,10 @@ def binarize_image(image: np.ndarray, cfg: PreprocessConfig, filter_array: Optio
     filter_array = np.asarray(filter_array).reshape(-1)
     assert filter_array.size == 3, f"filter_array must contain 3 values, got shape {np.asarray(filter_array).shape}"
 
-    tol = float(cfg.color_filter_tolerance)
-
     # --- Build mask of background pixels close to reference color ---
     if filter_method == "rgb":
+
+        tol = float(cfg.color_filter_tolerance_rgb)
         # filter_array is [R,G,B] in [0..255]
         ref = filter_array.astype(np.float32)
         delta = np.array([255.0, 255.0, 255.0], dtype=np.float32) * tol
@@ -305,6 +303,7 @@ def binarize_image(image: np.ndarray, cfg: PreprocessConfig, filter_array: Optio
     else:  # hsv
         # filter_array is [H,S,V] where H in [0..179], S,V in [0..255]
         image_hsv = cv.cvtColor(image, cv.COLOR_RGB2HSV)
+        tol = float(cfg.color_filter_tolerance_hsv)
 
         H, S, V = filter_array.astype(np.int32)
         dH = int(179 * tol)
