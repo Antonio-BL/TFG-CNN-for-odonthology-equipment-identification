@@ -41,14 +41,21 @@ class PreprocessConfig:
     close_kernel_dims: tuple[int, int]= (20, 20)                            # Dimensions of the kernel for morphological open
     
     # filtering parameters for ALL color filtering actions
-    color_filter_method: str = "rgb"                                        # Color system used in the filtering: rgb | hsv
+    color_filter_method: str = "hsv"                                        # Color system used in the filtering: rgb | hsv
     color_filter_tolerance_rgb: float = 0.5                                 # Tolerance for the filtering using rgb colors
     color_filter_tolerance_hsv: float = 0.15                                # Tolerance for the filtering using hsv colors
-  
+    color_filter_hsv_limits: tuple[tuple[Optional[int], Optional[int]],
+                               tuple[Optional[int], Optional[int]],
+                               tuple[Optional[int], Optional[int]]] = (
+    (None, None),   # H
+    (None, 30),     # S
+    (30, 245)       # V
+)
+
     # Patch dimensions
     patch_center: int = None                                                # Center around which to get a patch of the image
     patch_size: int = 10                                                    # Length of the sides of the patch
-
+    
     # ROI detection parameters
     ROI_background_color: tuple[int, int, int] = (30, 90, 170)              # Color of the background of the area of interest in RGB (usually blue). 
     roi_padding: int = 30                                                   # Padding around clusters
@@ -163,29 +170,45 @@ def get_avg_color(patches: list[np.ndarray], cfg: PreprocessConfig) -> np.ndarra
     """
     Robust background color estimation from multiple RGB patches.
     Returns RGB uint8 (3,).
+    Gets avg color after ensuring S and V values are within range. 
     Arguments: 
         patches: list of patches of an image to ger an average color of.
         cfg: Configuration class.
     Returns: 
         ref_rgb: Average color in rgb format.
     """
-    hsv_samples = []
+       hsv_samples = []
+
+    H_lim, S_lim, V_lim = cfg.color_filter_hsv_limits
 
     for patch in patches:
         hsv = cv.cvtColor(patch, cv.COLOR_RGB2HSV).reshape(-1, 3).astype(np.float32)
 
-        H = hsv[:, 0]
-        S = hsv[:, 1]
-        V = hsv[:, 2]
+        H, S, V = hsv[:, 0], hsv[:, 1], hsv[:, 2]
 
-        # Reject low saturation pixels (metal/grey reflections)
-        keep = S > 30
+        keep = np.ones(len(hsv), dtype=bool)
 
-        # Reject very dark and very bright pixels (shadows / glare)
-        keep &= (V > 30) & (V < 245)
+        # Apply  limits
+
+        if H_lim[0] is not None:
+            keep &= H >= H_lim[0]       # Lower H Limit
+        if H_lim[1] is not None:
+            keep &= H <= H_lim[1]       # Upper H Limit
+
+        if S_lim[0] is not None:
+            keep &= S >= S_lim[0]       # Lower S Limit
+        if S_lim[1] is not None:
+            keep &= S <= S_lim[1]       # Upper S Limit
+
+        if V_lim[0] is not None:
+            keep &= V >= V_lim[0]       # Lower V Limit
+        if V_lim[1] is not None:
+            keep &= V <= V_lim[1]       # Upper V Limit
 
         hsv = hsv[keep]
-        if hsv.shape[0] < 200:
+
+
+        if hsv.shape[0] < 0.05 * patch.size / 3:
             continue
 
         hsv_samples.append(hsv)
@@ -429,91 +452,134 @@ def binarize_image(image: np.ndarray, cfg: PreprocessConfig, filter_array: Optio
 
     return filtered_image
 
+
 # %% Main ----------------------------------------------------------
 def main():
 
-     # -----------------------------
+    # -----------------------------
     # 0) Config + load images
     # -----------------------------
     cfg = PreprocessConfig()
 
-    trays_directory = r"./Trays"  # <-- relative path (as you requested)
+    trays_directory = r"./Trays"
     tray_images = load_images(trays_directory, cfg)
     if len(tray_images) == 0:
         raise FileNotFoundError(f"No images found in {trays_directory}")
 
-    print(f"{len(tray_images)} images loaded from {trays_directory}.\n")
-
-    # Pick random image
     img_rgb = tray_images[np.random.randint(0, len(tray_images))]
 
-    # Helper: show RGB image correctly with OpenCV (expects BGR)
-    def show_rgb(title: str, rgb: np.ndarray):
-        cv.imshow(title, cv.cvtColor(rgb, cv.COLOR_RGB2BGR))
-        cv.waitKey(0)
-        cv.destroyAllWindows()
-
-    def show_gray(title: str, gray: np.ndarray):
-        cv.imshow(title, gray)
-        cv.waitKey(0)
-        cv.destroyAllWindows()
-
     # -----------------------------
-    # 1) Show original
-    # -----------------------------
-    show_rgb("01 - Original (RGB)", img_rgb)
-
-    # -----------------------------
-    # 2) ROI detection (shows mask + cropped ROI)
+    # 1) ROI
     # -----------------------------
     roi_crop, roi_mask, roi_bbox = get_ROI_from_color(img_rgb, cfg)
-    print(f"ROI bbox: {roi_bbox}  (x, y, w, h)")
-
-    show_gray("02 - ROI mask (white=ROI background)", roi_mask)
-    show_rgb("03 - ROI crop (RGB)", roi_crop)
 
     # -----------------------------
-    # 3) Background reference estimation (patches -> ref color swatch)
+    # 2) HSV conversion
+    # -----------------------------
+    img_hsv = cv.cvtColor(img_rgb, cv.COLOR_RGB2HSV)
+    H, S, V = cv.split(img_hsv)
+
+    # -----------------------------
+    # 3) Plot 1: RGB + HSV channels
+    # -----------------------------
+    fig1, axs = plt.subplots(2, 3, figsize=(14, 8))
+
+    axs[0, 0].imshow(img_rgb)
+    axs[0, 0].set_title("Original RGB")
+    axs[0, 0].axis("off")
+
+    axs[0, 1].imshow(img_hsv)
+    axs[0, 1].set_title("HSV (visualizado como RGB)")
+    axs[0, 1].axis("off")
+
+    axs[0, 2].axis("off")
+
+    axs[1, 0].imshow(H, cmap="hsv")
+    axs[1, 0].set_title("Canal H")
+    axs[1, 0].axis("off")
+
+    axs[1, 1].imshow(S, cmap="gray")
+    axs[1, 1].set_title("Canal S")
+    axs[1, 1].axis("off")
+
+    axs[1, 2].imshow(V, cmap="gray")
+    axs[1, 2].set_title("Canal V")
+    axs[1, 2].axis("off")
+
+    plt.tight_layout()
+    plt.show()
+
+    # -----------------------------
+    # 4) Color medio
     # -----------------------------
     patches = get_multi_patches(roi_crop, cfg)
     ref_rgb = get_avg_color(patches, cfg)
 
-    # Show a color swatch to verify the estimated background color
-    swatch = np.zeros((140, 140, 3), dtype=np.uint8)
+    swatch = np.zeros((150, 150, 3), dtype=np.uint8)
     swatch[:] = ref_rgb
-    show_rgb(f"04 - Estimated bg color swatch (RGB) = {tuple(ref_rgb.tolist())}", swatch)
 
     # -----------------------------
-    # 4) Binarization (RGB and HSV) + masked visualization
+    # 5) Binarización
     # -----------------------------
-    # --- RGB method ---
+    # RGB
     cfg.color_filter_method = "rgb"
-    mask_tools_rgb = binarize_image(roi_crop, cfg, filter_array=ref_rgb)
-    masked_tools_rgb = cv.bitwise_and(roi_crop, roi_crop, mask=mask_tools_rgb)
+    mask_rgb = binarize_image(roi_crop, cfg, filter_array=ref_rgb)
 
-    show_gray("05 - Tools mask (RGB method) (white=tools)", mask_tools_rgb)
-    show_rgb("06 - Tools masked (RGB method)", masked_tools_rgb)
-
-    # --- HSV method ---
-    # Convert ref_rgb -> ref_hsv for HSV binarization
+    # HSV
     ref_hsv = cv.cvtColor(ref_rgb.reshape(1, 1, 3), cv.COLOR_RGB2HSV).reshape(3,)
-
     cfg.color_filter_method = "hsv"
-    mask_tools_hsv = binarize_image(roi_crop, cfg, filter_array=ref_hsv)
-    masked_tools_hsv = cv.bitwise_and(roi_crop, roi_crop, mask=mask_tools_hsv)
-
-    show_gray("07 - Tools mask (HSV method) (white=tools)", mask_tools_hsv)
-    show_rgb("08 - Tools masked (HSV method)", masked_tools_hsv)
+    mask_hsv = binarize_image(roi_crop, cfg, filter_array=ref_hsv)
 
     # -----------------------------
-    # 5) Optional: Laplace edges on grayscale ROI (for inspection)
+    # 6) Cálculo de áreas
+    # -----------------------------
+    area_rgb = np.sum(mask_rgb == 255)
+    area_hsv = np.sum(mask_hsv == 255)
+
+    # -----------------------------
+    # 7) Plot 2: máscaras + áreas
+    # -----------------------------
+    fig2, axs = plt.subplots(1, 3, figsize=(15, 5))
+
+    axs[0].imshow(mask_rgb, cmap="gray")
+    axs[0].set_title(f"Mask RGB\nÁrea: {area_rgb}")
+    axs[0].axis("off")
+
+    axs[1].imshow(mask_hsv, cmap="gray")
+    axs[1].set_title(f"Mask HSV\nÁrea: {area_hsv}")
+    axs[1].axis("off")
+
+    axs[2].imshow(roi_mask, cmap="gray")
+    axs[2].set_title("ROI mask")
+    axs[2].axis("off")
+
+    plt.tight_layout()
+    plt.show()
+
+    # -----------------------------
+    # 8) Plot 3: color medio
+    # -----------------------------
+    fig3, ax = plt.subplots(figsize=(3, 3))
+
+    ax.imshow(swatch)
+    ax.set_title(f"Color medio RGB\n{tuple(ref_rgb.tolist())}")
+    ax.axis("off")
+
+    plt.show()
+
+    # -----------------------------
+    # 9) Bordes (opcional)
     # -----------------------------
     roi_gray = cv.cvtColor(roi_crop, cv.COLOR_RGB2GRAY)
     edges = edge_Laplace(roi_gray)
-    edges_abs = np.abs(edges)
-    edges_vis = cv.normalize(edges_abs, None, 0, 255, cv.NORM_MINMAX).astype(np.uint8)
+    edges = np.abs(edges)
+    edges = cv.normalize(edges, None, 0, 255, cv.NORM_MINMAX).astype(np.uint8)
 
-    show_gray("09 - Laplace edges (normalized)", edges_vis)
+    plt.figure(figsize=(5, 5))
+    plt.imshow(edges, cmap="gray")
+    plt.title("Laplace edges")
+    plt.axis("off")
+    plt.show()
 
     return
 
