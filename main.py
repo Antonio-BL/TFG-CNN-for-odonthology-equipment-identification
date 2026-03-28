@@ -2,7 +2,7 @@
 import numpy as np
 from config          import PreprocessConfig
 from utils           import load_images
-from preprocessing   import get_ROI_from_color, binarize_image
+from preprocess      import get_ROI_from_color, binarize_image
 from segmentation    import segment_instruments
 
 def main():

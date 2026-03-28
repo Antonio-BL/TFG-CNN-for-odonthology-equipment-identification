@@ -6,6 +6,7 @@
 import os
 import platform
 import numpy as np
+import cv2 as cv
 import matplotlib.pyplot as plt
 
 # ================================================================== #
@@ -18,9 +19,8 @@ if platform.system() == "Linux":
 # Project imports                                                    #
 # ================================================================== #
 from config        import PreprocessConfig
-from utils         import (load_images, binarize_image,
-                           get_multi_patches, get_avg_color)
-from preprocess import get_ROI_from_color   # was missing
+from utils         import (load_images, get_multi_patches, get_avg_color)
+from preprocess    import get_ROI_from_color, binarize_image
 
 # ================================================================== #
 # Local functions                                                    #
@@ -42,7 +42,7 @@ def main(debugging: bool = False):
 
     # -- Preprocessing --
     roi_crop, roi_mask, roi_bbox = get_ROI_from_color(img_rgb, cfg)
-    roi_masked_image = cv.bitwise_and(image, image, mask=roi_mask)
+    roi_masked_image = cv.bitwise_and(img_rgb, img_rgb, mask=roi_mask)
 
     binary_mask = binarize_image(roi_crop, cfg)
 

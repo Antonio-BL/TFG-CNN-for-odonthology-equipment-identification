@@ -3,7 +3,6 @@
 # ================================================================== #
 import os
 import platform 
-from typing import Optional
 import numpy as np 
 import pandas as pd 
 
@@ -195,97 +194,4 @@ def get_avg_color(patches: list[np.ndarray], cfg: PreprocessConfig) -> np.ndarra
     return ref_rgb.astype(np.uint8)
 
 
-def binarize_image(image: np.ndarray, cfg: PreprocessConfig, filter_array: Optional[np.ndarray]=None) -> np.ndarray:
-    '''
-    Filters the image to obtain a binarized image by using color. Can filter in RGB color system and HSV.
-
-    Args:
-        image: np.ndarray, image to be filtered. RGB format.
-        cfg: Configuration parameters.
-        filter_array: array containing the filter reference values (RGB or HSV depending on method).
-                      If None, it is computed from the average color of a centered patch.
-    Returns:
-        filtered_image: np.ndarray uint8(H, W) containing the binarized mask (tool=255, background=0).
-    '''
-    # Initialize values and read arguments
-    valid_methods = ["hsv", "rgb"]
-    filtered_image = image  # will be overwritten with the final binary mask
-    filter_method = cfg.color_filter_method.lower().strip()
-
-    # --- Get reference color if not provided ---
-    if filter_array is None:
-        patches = get_multi_patches(image=image, cfg=cfg)
-        filter_array = get_avg_color(patches, cfg=cfg)  # returns RGB
-        if filter_method == "hsv":
-            ref_rgb = np.asarray(filter_array, dtype=np.uint8).reshape(1, 1, 3)
-            filter_array = cv.cvtColor(ref_rgb, cv.COLOR_RGB2HSV).reshape(3,)
-
-    # --- Validate method ---
-    assert filter_method in valid_methods, (
-        f"Method {cfg.color_filter_method} not recognized: choose between HSV or RGB \n"
-    )
-
-    # --- Validate filter_array shape ---
-    # Accept (3,), (3,1) or (1,3) and normalize to (3,)
-    filter_array = np.asarray(filter_array).reshape(-1)
-    assert filter_array.size == 3, f"filter_array must contain 3 values, got shape {np.asarray(filter_array).shape}"
-
-    # --- Build mask of background pixels close to reference color ---
-    if filter_method == "rgb":
-
-        tol = float(cfg.color_filter_tolerance_rgb)
-        # filter_array is [R,G,B] in [0..255]
-        ref = filter_array.astype(np.float32)
-        delta = np.array([255.0, 255.0, 255.0], dtype=np.float32) * tol
-
-        lower = np.clip(ref - delta, 0, 255).astype(np.uint8)
-        upper = np.clip(ref + delta, 0, 255).astype(np.uint8)
-
-        mask_bg = cv.inRange(image, lower, upper)
-
-    else:  # hsv
-        # filter_array is [H,S,V] where H in [0..179], S,V in [0..255]
-        image_hsv = cv.cvtColor(image, cv.COLOR_RGB2HSV)
-        tol = float(cfg.color_filter_tolerance_hsv)
-
-        H, S, V = filter_array.astype(np.int32)
-        dH = int(179 * tol)
-        dS = int(255 * tol)
-        dV = int(255 * tol)
-
-        s_low = max(S - dS, 0)
-        s_up  = min(S + dS, 255)
-        v_low = max(V - dV, 0)
-        v_up  = min(V + dV, 255)
-
-        h_low = H - dH
-        h_up  = H + dH
-
-        # Hue is circular -> handle wrap-around by combining two ranges if needed
-        if h_low < 0 or h_up > 179:
-            lowerA = np.array([0, s_low, v_low], dtype=np.uint8)
-            upperA = np.array([min(h_up, 179), s_up, v_up], dtype=np.uint8)
-            maskA = cv.inRange(image_hsv, lowerA, upperA)
-
-            lowerB = np.array([max(h_low + 180, 0), s_low, v_low], dtype=np.uint8)
-            upperB = np.array([179, s_up, v_up], dtype=np.uint8)
-            maskB = cv.inRange(image_hsv, lowerB, upperB)
-
-            mask_bg = cv.bitwise_or(maskA, maskB)
-        else:
-            lower = np.array([h_low, s_low, v_low], dtype=np.uint8)
-            upper = np.array([h_up,  s_up,  v_up], dtype=np.uint8)
-            mask_bg = cv.inRange(image_hsv, lower, upper)
-
-    # --- Invert so that tools/foreground are white (255) ---
-    filtered_image = cv.bitwise_not(mask_bg)
-
-    # --- Morphological cleanup ---
-    open_kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.open_kernel_dims)
-    close_kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.close_kernel_dims)
-
-    filtered_image = cv.morphologyEx(filtered_image, cv.MORPH_OPEN, open_kernel)
-    filtered_image = cv.morphologyEx(filtered_image, cv.MORPH_CLOSE, close_kernel)
-
-    return filtered_image
 

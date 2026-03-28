@@ -28,7 +28,7 @@ if platform.system() == "Linux":
 # ================================================================== #
 from config import PreprocessConfig
 from utils  import (load_images, open_close_cleanup,
-                    get_multi_patches, get_avg_color, binarize_image)
+                    get_multi_patches, get_avg_color)
 
 # ================================================================== #
 # Local functions                                                    #
@@ -142,6 +142,75 @@ def get_ROI_from_color(image: np.ndarray, cfg: PreprocessConfig):
     roi_bbox = (x0, y0, x1-x0, y1-y0)
 
     return roi_crop, roi_mask, roi_bbox
+
+
+def binarize_image(image: np.ndarray, cfg: PreprocessConfig, filter_array=None) -> np.ndarray:
+    '''
+    Filters the image to obtain a binarized image by using color. Can filter in RGB color system and HSV.
+
+    Args:
+        image: np.ndarray, image to be filtered. RGB format.
+        cfg: Configuration parameters.
+        filter_array: array containing the filter reference values (RGB or HSV depending on method).
+                      If None, it is computed from the average color of a centered patch.
+    Returns:
+        filtered_image: np.ndarray uint8(H, W) containing the binarized mask (tool=255, background=0).
+    '''
+    valid_methods = ["hsv", "rgb"]
+    filtered_image = image
+    filter_method = cfg.color_filter_method.lower().strip()
+
+    if filter_array is None:
+        patches = get_multi_patches(image=image, cfg=cfg)
+        filter_array = get_avg_color(patches, cfg=cfg)
+        if filter_method == "hsv":
+            ref_rgb = np.asarray(filter_array, dtype=np.uint8).reshape(1, 1, 3)
+            filter_array = cv.cvtColor(ref_rgb, cv.COLOR_RGB2HSV).reshape(3,)
+
+    assert filter_method in valid_methods, (
+        f"Method {cfg.color_filter_method} not recognized: choose between HSV or RGB \n"
+    )
+
+    filter_array = np.asarray(filter_array).reshape(-1)
+    assert filter_array.size == 3, f"filter_array must contain 3 values, got shape {np.asarray(filter_array).shape}"
+
+    if filter_method == "rgb":
+        tol = float(cfg.color_filter_tolerance_rgb)
+        ref = filter_array.astype(np.float32)
+        delta = np.array([255.0, 255.0, 255.0], dtype=np.float32) * tol
+        lower = np.clip(ref - delta, 0, 255).astype(np.uint8)
+        upper = np.clip(ref + delta, 0, 255).astype(np.uint8)
+        mask_bg = cv.inRange(image, lower, upper)
+    else:
+        image_hsv = cv.cvtColor(image, cv.COLOR_RGB2HSV)
+        tol = float(cfg.color_filter_tolerance_hsv)
+        H, S, V = filter_array.astype(np.int32)
+        dH, dS, dV = int(179 * tol), int(255 * tol), int(255 * tol)
+        s_low, s_up = max(S - dS, 0), min(S + dS, 255)
+        v_low, v_up = max(V - dV, 0), min(V + dV, 255)
+        h_low, h_up = H - dH, H + dH
+
+        if h_low < 0 or h_up > 179:
+            maskA = cv.inRange(image_hsv,
+                               np.array([0,             s_low, v_low], dtype=np.uint8),
+                               np.array([min(h_up, 179), s_up,  v_up], dtype=np.uint8))
+            maskB = cv.inRange(image_hsv,
+                               np.array([max(h_low + 180, 0), s_low, v_low], dtype=np.uint8),
+                               np.array([179,                  s_up,  v_up], dtype=np.uint8))
+            mask_bg = cv.bitwise_or(maskA, maskB)
+        else:
+            mask_bg = cv.inRange(image_hsv,
+                                 np.array([h_low, s_low, v_low], dtype=np.uint8),
+                                 np.array([h_up,  s_up,  v_up],  dtype=np.uint8))
+
+    filtered_image = cv.bitwise_not(mask_bg)
+
+    open_kernel  = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.open_kernel_dims)
+    close_kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.close_kernel_dims)
+    filtered_image = cv.morphologyEx(filtered_image, cv.MORPH_OPEN,  open_kernel)
+    filtered_image = cv.morphologyEx(filtered_image, cv.MORPH_CLOSE, close_kernel)
+
+    return filtered_image
 
 
 # ================================================================== #
