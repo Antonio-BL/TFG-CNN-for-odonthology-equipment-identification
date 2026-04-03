@@ -7,7 +7,8 @@ class PreprocessConfig:
     # General
     image_dims: tuple[int, int] = (4284, 5712)                              # Image dimensions during preprocessing (resolution)
     open_kernel_dims: tuple[int, int] = (3, 3)                              # Dimensions of the kernel for morphological open
-    close_kernel_dims: tuple[int, int] = (20, 20)                           # Dimensions of the kernel for morphological close
+    close_kernel_dims: tuple[int, int] = (10, 10)                           # Dimensions of the kernel for morphological close (reduced: was 20×20, trailing erosion was too aggressive)
+    dilate_kernel_dims: tuple[int, int] = (5, 5)                            # Dimensions of the kernel for the recovery dilation applied after open+close
 
     # Filtering parameters for ALL color filtering actions
     color_filter_method: str = "hsv"                                        # Color system used in the filtering: rgb | hsv

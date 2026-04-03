@@ -33,7 +33,10 @@ from utils  import (load_images, open_close_cleanup,
 # ================================================================== #
 # Local functions                                                    #
 # ================================================================== #
-def get_ROI_from_color(image: np.ndarray, cfg: PreprocessConfig):
+def get_ROI_from_color(
+    image: np.ndarray,
+    cfg: PreprocessConfig
+): 
     """
     Detects the ROI corresponding to the tray background using
     an adaptive color reference from get_avg_color.
@@ -185,7 +188,11 @@ def normalize_illumination_clahe(
     return cv.cvtColor(image_ycrcb, cv.COLOR_YCrCb2RGB).astype(np.uint8)
 
 
-def binarize_image(image: np.ndarray, cfg: PreprocessConfig, filter_array=None) -> np.ndarray:
+def binarize_image(
+    image: np.ndarray,
+    cfg: PreprocessConfig,
+    filter_array=None
+) -> np.ndarray:
     """
     Produces a binary mask that isolates surgical instruments from the tray background.
 
@@ -271,6 +278,11 @@ def binarize_image(image: np.ndarray, cfg: PreprocessConfig, filter_array=None) 
     close_kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.close_kernel_dims)
     filtered_image = cv.morphologyEx(filtered_image, cv.MORPH_OPEN,  open_kernel)
     filtered_image = cv.morphologyEx(filtered_image, cv.MORPH_CLOSE, close_kernel)
+
+    # Recovery dilation: grows tool boundaries back out to compensate for the
+    # erosion introduced by the open and close steps above.
+    dilate_kernel  = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.dilate_kernel_dims)
+    filtered_image = cv.dilate(filtered_image, dilate_kernel)
 
     return filtered_image
 
