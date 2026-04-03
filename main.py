@@ -9,6 +9,8 @@ def main():
     cfg = PreprocessConfig()
 
     # -- Image Loading --
+    # debug=True (set in PreprocessConfig): loads one random image.
+    # debug=False: loads all images, using a disk cache at ./cache/images.pkl.
     images = load_images("./Trays", cfg)
     img_rgb = images[np.random.randint(0, len(images))]
 

@@ -1,4 +1,13 @@
 # Segments images after preprocessing.
+# 1. Obtain preprocessing info: binarized image, only tools mask.et
+# 2. Bounding boxes and orientation.
+# 3. Get average size, px density and other features of each bbox. 
+# 4. Detect outlying bboxes:
+    # 4.1 By size
+    # 4.2 By Density 
+    # 4.3 
+# 5.
+# 6. 
 
 # ================================================================== #
 # Basic dependencies                                                 #
@@ -25,7 +34,7 @@ from preprocess    import get_ROI_from_color, binarize_image
 # ================================================================== #
 # Local functions                                                    #
 # ================================================================== #
-# (your segmentation functions will go here)
+
 
 # ================================================================== #
 # Main                                                               #

@@ -63,16 +63,14 @@ def get_ROI_from_color(image: np.ndarray, cfg: PreprocessConfig):
 
     # 2) Build background mask
     # ---------------------------------------------------------
-    tol = (float(cfg.color_filter_tolerance_hsv)
-           if cfg.color_filter_method.lower().strip() == "hsv"
-           else float(cfg.color_filter_tolerance_rgb))
-
     if cfg.color_filter_method.lower().strip() == "hsv":
         image_hsv = cv.cvtColor(image, cv.COLOR_RGB2HSV)
         bg_hsv    = cv.cvtColor(bg_rgb, cv.COLOR_RGB2HSV).reshape(3,)
         H0, S0, V0 = bg_hsv.astype(np.int32)
 
-        dH, dS, dV = int(179*tol), int(255*tol), int(255*tol)
+        dH = int(179 * cfg.color_filter_tolerance_h)
+        dS = int(255 * cfg.color_filter_tolerance_s)
+        dV = int(255 * cfg.color_filter_tolerance_v)
         s_low, s_up = max(S0-dS, 0),   min(S0+dS, 255)
         v_low, v_up = max(V0-dV, 0),   min(V0+dV, 255)
         h_low, h_up = H0-dH, H0+dH
@@ -91,7 +89,7 @@ def get_ROI_from_color(image: np.ndarray, cfg: PreprocessConfig):
                                  np.array([h_up,  s_up,  v_up],  dtype=np.uint8))
     else:
         ref   = bg_rgb.reshape(3,).astype(np.float32)
-        delta = np.array([255.0, 255.0, 255.0]) * tol
+        delta = np.array([255.0, 255.0, 255.0]) * float(cfg.color_filter_tolerance_rgb)
         bg_mask = cv.inRange(image,
                              np.clip(ref-delta, 0, 255).astype(np.uint8),
                              np.clip(ref+delta, 0, 255).astype(np.uint8))
@@ -144,24 +142,87 @@ def get_ROI_from_color(image: np.ndarray, cfg: PreprocessConfig):
     return roi_crop, roi_mask, roi_bbox
 
 
-def binarize_image(image: np.ndarray, cfg: PreprocessConfig, filter_array=None) -> np.ndarray:
-    '''
-    Filters the image to obtain a binarized image by using color. Can filter in RGB color system and HSV.
+def normalize_illumination_clahe(
+    image: np.ndarray,
+    clip_limit: float = 2.0,
+    tile_grid: tuple[int, int] = (8, 8),
+) -> np.ndarray:
+    """
+    Normalises uneven illumination in an RGB image using CLAHE applied to the
+    luminance channel of the YCrCb colour space.
+
+    CLAHE (Contrast Limited Adaptive Histogram Equalisation) redistributes pixel
+    intensities locally within a grid of tiles, boosting contrast in dark regions
+    (such as cast shadows) without amplifying noise — unlike global histogram
+    equalisation. The clip_limit parameter caps the contrast amplification per tile
+    to prevent over-enhancement.
+
+    YCrCb separates luminance (Y) from chroma (Cr, Cb), so applying CLAHE only to
+    channel 0 (Y) normalises brightness across the image while leaving the colour
+    information in Cr and Cb untouched. This is critical here because the HSV
+    filtering that follows relies on accurate hue and saturation values: if CLAHE
+    were applied to all channels it would distort those values and undermine the
+    colour-based background detection.
+
+    By evening out the V (brightness) component before the HSV filter sees the
+    image, shadows on the tray background — which lower V without changing H — are
+    brought back into the brightness range of well-lit background pixels. This
+    prevents shadowed background regions from being misclassified as tools.
 
     Args:
-        image: np.ndarray, image to be filtered. RGB format.
-        cfg: Configuration parameters.
-        filter_array: array containing the filter reference values (RGB or HSV depending on method).
-                      If None, it is computed from the average color of a centered patch.
+        image:      RGB image, shape (H, W, 3), dtype uint8.
+        clip_limit: Contrast amplification limit per CLAHE tile. Higher values
+                    produce stronger equalisation but may introduce artefacts.
+        tile_grid:  (rows, cols) number of tiles CLAHE divides the image into.
+                    Smaller grids → more global; larger grids → more local.
+
     Returns:
-        filtered_image: np.ndarray uint8(H, W) containing the binarized mask (tool=255, background=0).
-    '''
+        Illumination-normalised RGB image, shape (H, W, 3), dtype uint8.
+    """
+    image_ycrcb = cv.cvtColor(image, cv.COLOR_RGB2YCrCb)
+    clahe = cv.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid)
+    image_ycrcb[:, :, 0] = clahe.apply(image_ycrcb[:, :, 0])
+    return cv.cvtColor(image_ycrcb, cv.COLOR_YCrCb2RGB).astype(np.uint8)
+
+
+def binarize_image(image: np.ndarray, cfg: PreprocessConfig, filter_array=None) -> np.ndarray:
+    """
+    Produces a binary mask that isolates surgical instruments from the tray background.
+
+    Processing steps:
+      1. Illumination normalisation via CLAHE (see normalize_illumination_clahe) so
+         that shadowed background pixels are not misclassified as tools.
+      2. Background colour estimation from multi-patch sampling (when filter_array
+         is not provided).
+      3. Background masking using per-channel HSV tolerances (H, S, V each have an
+         independent tolerance configured in PreprocessConfig), or a uniform RGB
+         tolerance when cfg.color_filter_method == "rgb".
+      4. Morphological open + close to remove small noise blobs.
+
+    Args:
+        image:        RGB image to binarize, shape (H, W, 3), dtype uint8.
+        cfg:          Configuration parameters (filter method, tolerances, kernels,
+                      CLAHE settings).
+        filter_array: Reference colour for background detection. When None it is
+                      computed automatically from the average colour of peripheral
+                      patches. For HSV mode this must be an HSV triplet; for RGB
+                      mode an RGB triplet.
+
+    Returns:
+        filtered_image: uint8 binary mask, shape (H, W). Tools = 255, background = 0.
+    """
+    # 1) Normalise illumination so shadows do not fool the colour filter
+    image_normalised = normalize_illumination_clahe(
+        image,
+        clip_limit=cfg.clahe_clip_limit,
+        tile_grid=cfg.clahe_tile_grid,
+    )
+
     valid_methods = ["hsv", "rgb"]
-    filtered_image = image
     filter_method = cfg.color_filter_method.lower().strip()
 
     if filter_array is None:
-        patches = get_multi_patches(image=image, cfg=cfg)
+        patches = get_multi_patches(image=image_normalised, cfg=cfg)
         filter_array = get_avg_color(patches, cfg=cfg)
         if filter_method == "hsv":
             ref_rgb = np.asarray(filter_array, dtype=np.uint8).reshape(1, 1, 3)
@@ -180,12 +241,13 @@ def binarize_image(image: np.ndarray, cfg: PreprocessConfig, filter_array=None) 
         delta = np.array([255.0, 255.0, 255.0], dtype=np.float32) * tol
         lower = np.clip(ref - delta, 0, 255).astype(np.uint8)
         upper = np.clip(ref + delta, 0, 255).astype(np.uint8)
-        mask_bg = cv.inRange(image, lower, upper)
+        mask_bg = cv.inRange(image_normalised, lower, upper)
     else:
-        image_hsv = cv.cvtColor(image, cv.COLOR_RGB2HSV)
-        tol = float(cfg.color_filter_tolerance_hsv)
+        image_hsv = cv.cvtColor(image_normalised, cv.COLOR_RGB2HSV)
         H, S, V = filter_array.astype(np.int32)
-        dH, dS, dV = int(179 * tol), int(255 * tol), int(255 * tol)
+        dH = int(179 * cfg.color_filter_tolerance_h)
+        dS = int(255 * cfg.color_filter_tolerance_s)
+        dV = int(255 * cfg.color_filter_tolerance_v)
         s_low, s_up = max(S - dS, 0), min(S + dS, 255)
         v_low, v_up = max(V - dV, 0), min(V + dV, 255)
         h_low, h_up = H - dH, H + dH
@@ -220,6 +282,8 @@ def main(debugging: bool = False):
     cfg = PreprocessConfig()
 
     # -- Load images --
+    # debug=True (set in PreprocessConfig): loads one random image.
+    # debug=False: loads all images, using a disk cache at ./cache/images.pkl.
     tray_images = load_images("./Trays", cfg)
     if not tray_images:
         raise FileNotFoundError("No images found in ./Trays")

@@ -2,9 +2,10 @@
 # Basic dependencies                                                 #
 # ================================================================== #
 import os
-import platform 
-import numpy as np 
-import pandas as pd 
+import platform
+import numpy as np
+import pandas as pd
+import pickle
 
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -29,33 +30,79 @@ from config import PreprocessConfig
 # ================================================================== #
 #  Global Functions: Helper Functions                                # 
 # ================================================================== #
+_CACHE_FILE = "./cache/images.pkl"
+
+def _collect_image_paths(path: str) -> list[str]:
+    paths = []
+    for wd, _, files in os.walk(path):
+        for f in files:
+            paths.append(os.path.join(wd, f))
+    return paths
+
+def _load_single(img_path: str, cfg: PreprocessConfig) -> np.ndarray | None:
+    img = cv.imread(img_path)
+    if img is None:
+        return None
+    img = cv.cvtColor(img, cv.COLOR_BGR2RGB)
+    return cv.resize(img, cfg.image_dims, interpolation=cv.INTER_AREA)
+
 def load_images(path: str, cfg: PreprocessConfig) -> list[np.ndarray]:
     '''
     Reads images in specified directories and loads them in an array.
-    Args: 
+
+    Behaviour depends on cfg.debug:
+      - debug=True:  loads one random image (fast, no cache).
+      - debug=False: loads all images; uses a disk cache (./cache/images.pkl)
+                     so repeated runs skip JPEG decoding and resizing.
+
+    Args:
         path: Path to scan for images.
-        cfg: Configuration parameters.
-    Returns: 
-        Array containing scanned images.
-    Raises: 
-        FileNotFoundError: if the directory does not exist
-    ''' 
-    if not os.path.isdir(path): 
+        cfg:  Configuration parameters.
+    Returns:
+        List of RGB images as numpy arrays.
+    Raises:
+        FileNotFoundError: if the directory does not exist.
+    '''
+    if not os.path.isdir(path):
         raise FileNotFoundError(f"{path} is not a directory \n")
 
+    image_paths = _collect_image_paths(path)
+    if not image_paths:
+        return []
+
+    # -- Debug mode: load one random image, skip cache --
+    if cfg.debug:
+        chosen = image_paths[np.random.randint(0, len(image_paths))]
+        img = _load_single(chosen, cfg)
+        if img is None:
+            raise ValueError(f"Could not load image: {chosen}")
+        print(f"[debug] Loaded 1 image: {chosen}")
+        return [img]
+
+    # -- Full mode: use disk cache when available --
+    if os.path.exists(_CACHE_FILE):
+        cache_mtime  = os.path.getmtime(_CACHE_FILE)
+        newest_image = max(os.path.getmtime(p) for p in image_paths)
+        if cache_mtime >= newest_image:
+            with open(_CACHE_FILE, "rb") as fh:
+                images = pickle.load(fh)
+            print(f"[cache] Loaded {len(images)} images from {_CACHE_FILE}")
+            return images
+
+    # -- Load from disk and write cache --
     images = []
-    for working_directory, directory, file in os.walk(path):
-        for f in file:
-            img_path = os.path.join(working_directory, f)
-            img= cv.imread(img_path)
-            img = cv.cvtColor(img, cv.COLOR_BGR2RGB)
-            if img is None:
-                print(f" Warning: Image {img_path} has been skipped: It is empty \n")
-                continue
-         
-            img = cv.resize(img, cfg.image_dims, interpolation=cv.INTER_AREA)
-            images.append(img)
-               
+    for img_path in image_paths:
+        img = _load_single(img_path, cfg)
+        if img is None:
+            print(f" Warning: {img_path} skipped (empty or unreadable)")
+            continue
+        images.append(img)
+
+    os.makedirs(os.path.dirname(_CACHE_FILE), exist_ok=True)
+    with open(_CACHE_FILE, "wb") as fh:
+        pickle.dump(images, fh)
+    print(f"[cache] Saved {len(images)} images to {_CACHE_FILE}")
+
     return images
 
 def edge_Laplace(image: np.array ) -> np.ndarray:
