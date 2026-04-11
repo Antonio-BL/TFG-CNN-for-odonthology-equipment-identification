@@ -272,19 +272,73 @@ def binarize_image(
                                  np.array([h_low, s_low, v_low], dtype=np.uint8),
                                  np.array([h_up,  s_up,  v_up],  dtype=np.uint8))
 
-    filtered_image = cv.bitwise_not(mask_bg)
-
+    # Blue background = 255, everything else = 0
     open_kernel  = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.open_kernel_dims)
     close_kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.close_kernel_dims)
-    filtered_image = cv.morphologyEx(filtered_image, cv.MORPH_OPEN,  open_kernel)
-    filtered_image = cv.morphologyEx(filtered_image, cv.MORPH_CLOSE, close_kernel)
+    mask_bg = cv.morphologyEx(mask_bg, cv.MORPH_OPEN,  open_kernel)
+    mask_bg = cv.morphologyEx(mask_bg, cv.MORPH_CLOSE, close_kernel)
 
-    # Recovery dilation: grows tool boundaries back out to compensate for the
-    # erosion introduced by the open and close steps above.
-    dilate_kernel  = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.dilate_kernel_dims)
-    filtered_image = cv.dilate(filtered_image, dilate_kernel)
+    return mask_bg
 
-    return filtered_image
+
+def get_tray_crop(
+    roi_crop: np.ndarray,
+    binary_mask: np.ndarray,
+    full_size_tol: float = 0.99,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Detects the tray boundary from the blue-background binary mask and returns
+    a masked image where only the tray interior is visible.
+
+    Finds contours on the binary mask (blue bg = 255). Discards any contour
+    whose bounding rect spans nearly the full ROI (desk/frame artefacts).
+    The largest remaining contour is taken as the tray boundary. A filled
+    contour mask is applied to roi_crop; all pixels outside the tray are zeroed,
+    so the returned image is the same size as the ROI but only shows the tray.
+
+    Args:
+        roi_crop:      RGB image, shape (H, W, 3).
+        binary_mask:   uint8 mask from binarize_image (blue bg = 255), shape (H, W).
+        full_size_tol: Fraction of both ROI dimensions above which a contour
+                       bounding rect is treated as a full-image artefact and skipped.
+
+    Returns:
+        tray_masked:  RGB image, same shape as roi_crop; non-tray pixels = 0.
+        tray_mask:    uint8 binary mask (H, W); tray interior = 255.
+        tray_contour: Raw contour array of the selected tray boundary.
+    """
+    H, W = roi_crop.shape[:2]
+
+    contours, _ = cv.findContours(binary_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        raise ValueError("No contours found in binary mask.")
+
+    tray_contour = None
+    best_area    = -1
+
+    for cnt in contours:
+        x, y, cw, ch = cv.boundingRect(cnt)
+        if cw >= full_size_tol * W and ch >= full_size_tol * H:
+            continue                    # skip full-ROI-sized artefacts (desk border)
+        area = cv.contourArea(cnt)
+        if area > best_area:
+            best_area    = area
+            tray_contour = cnt
+
+    if tray_contour is None:
+        raise ValueError(
+            "No valid tray contour found — every contour spans the full ROI. "
+            "Try reducing full_size_tol or adjusting binarization tolerances."
+        )
+
+    # Fill the contour on a black canvas → tray mask
+    tray_mask = np.zeros((H, W), dtype=np.uint8)
+    cv.drawContours(tray_mask, [tray_contour], -1, 255, thickness=cv.FILLED)
+
+    # Zero out everything outside the tray
+    tray_masked = cv.bitwise_and(roi_crop, roi_crop, mask=tray_mask)
+
+    return tray_masked, tray_mask, tray_contour
 
 
 # ================================================================== #
@@ -303,9 +357,11 @@ def main(debugging: bool = False):
     img_rgb = tray_images[np.random.randint(0, len(tray_images))]
 
     # -- ROI detection --
-    roi_crop, roi_mask, roi_bbox = get_ROI_from_color(img_rgb, cfg)    
+    roi_crop, roi_mask, roi_bbox = get_ROI_from_color(img_rgb, cfg)
     # -- Binarization --
     binary_mask = binarize_image(roi_crop, cfg)
+    # -- Tray crop --
+    tray_masked, tray_mask, tray_contour = get_tray_crop(roi_crop, binary_mask)
 
     # -- Debug visualizations --
     if debugging:
@@ -314,7 +370,14 @@ def main(debugging: bool = False):
         viz = img_rgb.copy()
         cv.rectangle(viz, (x0, y0), (x0+w, y0+h), (0, 255, 0), thickness=8)
 
-        fig, axs = plt.subplots(1, 3, figsize=(18, 6))
+        # Draw all contours + highlight the selected tray contour
+        contours, _ = cv.findContours(binary_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+        contour_viz = cv.cvtColor(roi_crop.copy(), cv.COLOR_RGB2BGR)
+        cv.drawContours(contour_viz, contours,      -1, (0, 0, 255), thickness=3)
+        cv.drawContours(contour_viz, [tray_contour], 0, (0, 255, 0), thickness=5)
+        contour_viz = cv.cvtColor(contour_viz, cv.COLOR_BGR2RGB)
+
+        fig, axs = plt.subplots(1, 5, figsize=(30, 6))
 
         axs[0].imshow(viz)
         axs[0].set_title("ROI bounding box")
@@ -325,13 +388,21 @@ def main(debugging: bool = False):
         axs[1].axis("off")
 
         axs[2].imshow(binary_mask, cmap="gray")
-        axs[2].set_title("Binary mask")
+        axs[2].set_title("Blue background mask (white=blue bg)")
         axs[2].axis("off")
+
+        axs[3].imshow(contour_viz)
+        axs[3].set_title(f"Contours — tray in green ({len(contours)} total)")
+        axs[3].axis("off")
+
+        axs[4].imshow(tray_masked)
+        axs[4].set_title("Tray masked (black = outside tray)")
+        axs[4].axis("off")
 
         plt.tight_layout()
         plt.show()
 
-    return roi_crop, binary_mask, roi_bbox
+    return roi_crop, binary_mask, tray_masked, tray_mask, roi_bbox
 
 if __name__ == "__main__":
     main(debugging=True)
