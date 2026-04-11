@@ -1,43 +1,53 @@
 from dataclasses import dataclass
 from typing import Optional
 
-@dataclass
+
 @dataclass
 class PreprocessConfig:
-    # General
-    image_dims: tuple[int, int] = (4284, 5712)                              # Image dimensions during preprocessing (resolution)
-    open_kernel_dims: tuple[int, int] = (3, 3)                              # Dimensions of the kernel for morphological open
-    close_kernel_dims: tuple[int, int] = (10, 10)                           # Dimensions of the kernel for morphological close (reduced: was 20×20, trailing erosion was too aggressive)
-    dilate_kernel_dims: tuple[int, int] = (5, 5)                            # Dimensions of the kernel for the recovery dilation applied after open+close
 
-    # Filtering parameters for ALL color filtering actions
-    color_filter_method: str = "hsv"                                        # Color system used in the filtering: rgb | hsv
-    color_filter_tolerance_rgb: float = 0.5                                 # Tolerance for the filtering using rgb colors
-    color_filter_tolerance_h: float = 0.10                                  # HSV hue tolerance   — tight: only match background hue
-    color_filter_tolerance_s: float = 0.30                                  # HSV sat tolerance   — medium
-    color_filter_tolerance_v: float = 1.00                                  # HSV value tolerance — full range: shadows shift V, not H
+    # -- Execution mode --
+    debug: bool = True
+
+    # -- Image loading (load_images) --
+    image_dims: tuple[int, int] = (4284, 5712)
+
+    # -- Patch sampling (get_multi_patches, get_avg_color) --
+    patch_size: int = 10
+    patch_center: int = None
+    ROI_background_color: tuple[int, int, int] = (30, 90, 170)
+
+    # -- Color filtering (shared by get_ROI_from_color and binarize_image) --
+    color_filter_method: str = "hsv"
+    color_filter_tolerance_rgb: float = 0.5
+    color_filter_tolerance_h: float = 0.10
+    color_filter_tolerance_s: float = 0.30
+    color_filter_tolerance_v: float = 1.00
     color_filter_hsv_limits: tuple[tuple[Optional[int], Optional[int]],
                                    tuple[Optional[int], Optional[int]],
                                    tuple[Optional[int], Optional[int]]] = (
-        (None, None),   # H — no restriction
-        (40,   220),    # S — excludes gray metal (S<40) and near-white (S>220)
-        (30,   220)     # V — excludes very dark shadows and specular highlights
+        (None, None),
+        (40,   220),
+        (30,   220),
     )
 
-    # Patch dimensions
-    patch_center: int = None                                                # Center around which to get a patch of the image
-    patch_size: int = 10                                                    # Length of the sides of the patch (% of shortest image dimension)
+    # -- ROI detection (get_ROI_from_color) --
+    roi_min_area_ratio: float = 0.03
+    roi_padding: int = 30
+    roi_open_kernel_dims: tuple[int, int] = (7, 7)
+    roi_close_kernel_dims: tuple[int, int] = (21, 21)
 
-    # ROI detection parameters
-    ROI_background_color: tuple[int, int, int] = (30, 90, 170)             # Fallback color of the background in RGB (usually blue), used if get_avg_color fails
-    roi_padding: int = 30                                                   # Padding around clusters
-    roi_min_area_ratio: float = 0.03                                        # Minimum valid cluster size as a percentage of the image area (default 3% of the total image area)
-    roi_open_kernel_dims: tuple[int, int] = (7, 7)                         # Dimensions of the kernel for morphological open after ROI
-    roi_close_kernel_dims: tuple[int, int] = (21, 21)                      # Dimensions of the kernel for morphological close after ROI
+    # -- CLAHE illumination (normalize_illumination_clahe) --
+    clahe_clip_limit: float = 2.0
+    clahe_tile_grid: tuple[int, int] = (8, 8)
 
-    # CLAHE illumination normalisation (used by binarize_image)
-    clahe_clip_limit: float = 2.0                                            # Contrast limit for CLAHE; higher = more aggressive equalisation
-    clahe_tile_grid: tuple[int, int] = (8, 8)                               # Grid size for CLAHE tile regions
+    # -- Binarization (binarize_image) --
+    open_kernel_dims: tuple[int, int] = (3, 3)
+    close_kernel_dims: tuple[int, int] = (10, 10)
 
-    # Execution mode
-    debug: bool = True                                                       # Debug mode: loads only one random image instead of the full dataset
+    # -- Tray crop (get_tray_crop) --
+    tray_full_size_tol: float = 0.99
+
+    # -- Segmentation (segment_instruments) --
+    seg_close_kernel_dims: tuple[int, int] = (16, 16)
+    seg_min_contour_area: int = 500
+    seg_median_area_threshold: float = 0.2

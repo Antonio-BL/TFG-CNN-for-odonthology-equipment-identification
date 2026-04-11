@@ -1,408 +1,350 @@
-# preprocessing.py
-# Loads and preprocesses images before segmentation.
-#   1. Load Images in RGB format:                           load_images
-#   2. Get the working area (ROI) based on background:      get_ROI_from_color
-#   3. Binarizes the image:                                 binarize_image
+# preprocess.py
+# Pipeline: load_images -> get_ROI_from_color -> binarize_image -> get_tray_crop -> remove_blue_background
 
-# ================================================================== #
-# Basic dependencies                                                 #
-# ================================================================== #
 import os
 import platform
 import numpy as np
 import matplotlib.pyplot as plt
-
-# ================================================================== #
-# Image processing dependencies                                      #
-# ================================================================== #
 import cv2 as cv
 
-# ================================================================== #
-# Linux support                                                      #
-# ================================================================== #
 if platform.system() == "Linux":
     os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
-# ================================================================== #
-# Project imports                                                    #
-# ================================================================== #
 from config import PreprocessConfig
-from utils  import (load_images, open_close_cleanup,
-                    get_multi_patches, get_avg_color)
+from utils import (load_images, open_close_cleanup,
+                   get_multi_patches, get_avg_color)
 
-# ================================================================== #
-# Local functions                                                    #
-# ================================================================== #
-def get_ROI_from_color(
-    image: np.ndarray,
-    cfg: PreprocessConfig
-): 
-    """
-    Detects the ROI corresponding to the tray background using
-    an adaptive color reference from get_avg_color.
-    Uses HSV color space.
+
+# ------------------------------------------------------------------ #
+#  Helpers                                                            #
+# ------------------------------------------------------------------ #
+
+def _build_hsv_mask(image_hsv, ref_hsv, cfg):
+    """Build an inRange mask in HSV with per-channel tolerances."""
+    H0, S0, V0 = ref_hsv.astype(np.int32)
+    dH = int(179 * cfg.color_filter_tolerance_h)
+    dS = int(255 * cfg.color_filter_tolerance_s)
+    dV = int(255 * cfg.color_filter_tolerance_v)
+
+    s_low, s_up = max(S0 - dS, 0), min(S0 + dS, 255)
+    v_low, v_up = max(V0 - dV, 0), min(V0 + dV, 255)
+    h_low, h_up = H0 - dH, H0 + dH
+
+    if h_low < 0 or h_up > 179:
+        mask_a = cv.inRange(
+            image_hsv,
+            np.array([0, s_low, v_low], dtype=np.uint8),
+            np.array([min(h_up, 179), s_up, v_up], dtype=np.uint8),
+        )
+        mask_b = cv.inRange(
+            image_hsv,
+            np.array([max(h_low + 180, 0), s_low, v_low], dtype=np.uint8),
+            np.array([179, s_up, v_up], dtype=np.uint8),
+        )
+        return cv.bitwise_or(mask_a, mask_b)
+
+    return cv.inRange(
+        image_hsv,
+        np.array([h_low, s_low, v_low], dtype=np.uint8),
+        np.array([h_up, s_up, v_up], dtype=np.uint8),
+    )
+
+
+def _build_rgb_mask(image, ref_rgb, cfg):
+    """Build an inRange mask in RGB with uniform tolerance."""
+    ref = ref_rgb.astype(np.float32)
+    delta = np.array([255.0, 255.0, 255.0]) * float(cfg.color_filter_tolerance_rgb)
+    return cv.inRange(
+        image,
+        np.clip(ref - delta, 0, 255).astype(np.uint8),
+        np.clip(ref + delta, 0, 255).astype(np.uint8),
+    )
+
+
+def _build_color_mask(image, ref_rgb, cfg):
+    """Dispatch to HSV or RGB mask builder based on cfg."""
+    method = cfg.color_filter_method.lower().strip()
+    if method == "hsv":
+        image_hsv = cv.cvtColor(image, cv.COLOR_RGB2HSV)
+        ref_hsv = cv.cvtColor(
+            ref_rgb.reshape(1, 1, 3), cv.COLOR_RGB2HSV
+        ).reshape(3)
+        return _build_hsv_mask(image_hsv, ref_hsv, cfg)
+    if method == "rgb":
+        return _build_rgb_mask(image, ref_rgb.reshape(3), cfg)
+    raise ValueError(f"Unknown color_filter_method: {cfg.color_filter_method!r}")
+
+
+# ------------------------------------------------------------------ #
+#  Step 1 — ROI detection                                            #
+# ------------------------------------------------------------------ #
+
+def get_ROI_from_color(image, cfg):
+    """Detect the ROI (blue tray background) and return its crop, mask and bbox.
 
     Args:
-        image: RGB image, shape (H, W, 3)
-        cfg:   PreprocessConfig
+        image: RGB uint8 (H, W, 3).
+        cfg:   PreprocessConfig.
 
     Returns:
-        roi_crop: cropped RGB image containing the ROI
-        roi_mask: binary mask uint8 (H, W), ROI region = 255
-        roi_bbox: tuple (x0, y0, w, h)
+        roi_crop: cropped RGB image.
+        roi_mask: binary mask (H, W), ROI = 255.
+        roi_bbox: (x0, y0, w, h).
     """
-    assert image is not None, "image is None"
-    assert image.ndim == 3 and image.shape[2] == 3, \
-        f"Expected RGB image (H,W,3), got shape {image.shape}"
+    assert image is not None and image.ndim == 3 and image.shape[2] == 3
 
     H_img, W_img = image.shape[:2]
 
-    # 1) Estimate background color adaptively
-    # ---------------------------------------------------------
+    # Adaptive background-color estimate
     bg_rgb = np.asarray(
-        get_avg_color(get_multi_patches(image, cfg), cfg),
-        dtype=np.uint8
-    ).reshape(1, 1, 3)
-
-    # 2) Build background mask
-    # ---------------------------------------------------------
-    if cfg.color_filter_method.lower().strip() == "hsv":
-        image_hsv = cv.cvtColor(image, cv.COLOR_RGB2HSV)
-        bg_hsv    = cv.cvtColor(bg_rgb, cv.COLOR_RGB2HSV).reshape(3,)
-        H0, S0, V0 = bg_hsv.astype(np.int32)
-
-        dH = int(179 * cfg.color_filter_tolerance_h)
-        dS = int(255 * cfg.color_filter_tolerance_s)
-        dV = int(255 * cfg.color_filter_tolerance_v)
-        s_low, s_up = max(S0-dS, 0),   min(S0+dS, 255)
-        v_low, v_up = max(V0-dV, 0),   min(V0+dV, 255)
-        h_low, h_up = H0-dH, H0+dH
-
-        if h_low < 0 or h_up > 179:
-            maskA = cv.inRange(image_hsv,
-                               np.array([0,             s_low, v_low], dtype=np.uint8),
-                               np.array([min(h_up, 179),s_up,  v_up],  dtype=np.uint8))
-            maskB = cv.inRange(image_hsv,
-                               np.array([max(h_low+180, 0), s_low, v_low], dtype=np.uint8),
-                               np.array([179,                s_up,  v_up],  dtype=np.uint8))
-            bg_mask = cv.bitwise_or(maskA, maskB)
-        else:
-            bg_mask = cv.inRange(image_hsv,
-                                 np.array([h_low, s_low, v_low], dtype=np.uint8),
-                                 np.array([h_up,  s_up,  v_up],  dtype=np.uint8))
-    else:
-        ref   = bg_rgb.reshape(3,).astype(np.float32)
-        delta = np.array([255.0, 255.0, 255.0]) * float(cfg.color_filter_tolerance_rgb)
-        bg_mask = cv.inRange(image,
-                             np.clip(ref-delta, 0, 255).astype(np.uint8),
-                             np.clip(ref+delta, 0, 255).astype(np.uint8))
-
-    # 3) Morphological cleanup
-    # ---------------------------------------------------------
-    bg_mask = open_close_cleanup(bg_mask, cfg)
-
-    # 4) Keep only the largest connected component
-    # ---------------------------------------------------------
-    num_labels, labels, stats, _ = cv.connectedComponentsWithStats(
-        bg_mask, connectivity=8
+        get_avg_color(get_multi_patches(image, cfg), cfg), dtype=np.uint8
     )
 
+    # Background mask
+    bg_mask = _build_color_mask(image, bg_rgb, cfg)
+    bg_mask = open_close_cleanup(bg_mask, cfg)
+
+    # Keep only the largest connected component above the area threshold
+    num_labels, labels, stats, _ = cv.connectedComponentsWithStats(bg_mask, 8)
     if num_labels <= 1:
         raise ValueError("No ROI background region detected.")
 
-    min_area   = int(cfg.roi_min_area_ratio * H_img * W_img)
+    min_area = int(cfg.roi_min_area_ratio * H_img * W_img)
     best_label, best_area = None, -1
-
     for lbl in range(1, num_labels):
         area = stats[lbl, cv.CC_STAT_AREA]
         if area >= min_area and area > best_area:
             best_area, best_label = area, lbl
 
     if best_label is None:
-        raise ValueError(
-            "No ROI component large enough. "
-            "Try reducing roi_min_area_ratio or increasing color_filter_tolerance."
-        )
+        raise ValueError("No ROI component large enough.")
 
     roi_mask = np.zeros_like(bg_mask)
     roi_mask[labels == best_label] = 255
 
-    close_kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.roi_close_kernel_dims)
-    roi_mask = cv.morphologyEx(roi_mask, cv.MORPH_CLOSE, close_kernel)
+    kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.roi_close_kernel_dims)
+    roi_mask = cv.morphologyEx(roi_mask, cv.MORPH_CLOSE, kernel)
 
-    # 5) Bounding box + padding
-    # ---------------------------------------------------------
+    # Bounding box + padding
     x, y, w, h = cv.boundingRect(cv.findNonZero(roi_mask))
-    pad = int(cfg.roi_padding)
-    x0  = max(0,      x - pad)
-    y0  = max(0,      y - pad)
-    x1  = min(W_img,  x + w + pad)
-    y1  = min(H_img,  y + h + pad)
+    pad = cfg.roi_padding
+    x0 = max(0, x - pad)
+    y0 = max(0, y - pad)
+    x1 = min(W_img, x + w + pad)
+    y1 = min(H_img, y + h + pad)
 
-    roi_crop = image[y0:y1, x0:x1]
-    roi_bbox = (x0, y0, x1-x0, y1-y0)
-
-    return roi_crop, roi_mask, roi_bbox
+    return image[y0:y1, x0:x1], roi_mask, (x0, y0, x1 - x0, y1 - y0)
 
 
-def normalize_illumination_clahe(
-    image: np.ndarray,
-    clip_limit: float = 2.0,
-    tile_grid: tuple[int, int] = (8, 8),
-) -> np.ndarray:
+# ------------------------------------------------------------------ #
+#  Step 2 — CLAHE illumination normalisation                         #
+# ------------------------------------------------------------------ #
+
+def normalize_illumination_clahe(image, clip_limit=2.0, tile_grid=(8, 8)):
+    """Apply CLAHE on the luminance channel (YCrCb) to even out shadows.
+
+    Only the Y channel is equalised, so hue and saturation stay intact
+    for the downstream HSV colour filter.
     """
-    Normalises uneven illumination in an RGB image using CLAHE applied to the
-    luminance channel of the YCrCb colour space.
-
-    CLAHE (Contrast Limited Adaptive Histogram Equalisation) redistributes pixel
-    intensities locally within a grid of tiles, boosting contrast in dark regions
-    (such as cast shadows) without amplifying noise — unlike global histogram
-    equalisation. The clip_limit parameter caps the contrast amplification per tile
-    to prevent over-enhancement.
-
-    YCrCb separates luminance (Y) from chroma (Cr, Cb), so applying CLAHE only to
-    channel 0 (Y) normalises brightness across the image while leaving the colour
-    information in Cr and Cb untouched. This is critical here because the HSV
-    filtering that follows relies on accurate hue and saturation values: if CLAHE
-    were applied to all channels it would distort those values and undermine the
-    colour-based background detection.
-
-    By evening out the V (brightness) component before the HSV filter sees the
-    image, shadows on the tray background — which lower V without changing H — are
-    brought back into the brightness range of well-lit background pixels. This
-    prevents shadowed background regions from being misclassified as tools.
-
-    Args:
-        image:      RGB image, shape (H, W, 3), dtype uint8.
-        clip_limit: Contrast amplification limit per CLAHE tile. Higher values
-                    produce stronger equalisation but may introduce artefacts.
-        tile_grid:  (rows, cols) number of tiles CLAHE divides the image into.
-                    Smaller grids → more global; larger grids → more local.
-
-    Returns:
-        Illumination-normalised RGB image, shape (H, W, 3), dtype uint8.
-    """
-    image_ycrcb = cv.cvtColor(image, cv.COLOR_RGB2YCrCb)
+    ycrcb = cv.cvtColor(image, cv.COLOR_RGB2YCrCb)
     clahe = cv.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid)
-    image_ycrcb[:, :, 0] = clahe.apply(image_ycrcb[:, :, 0])
-    return cv.cvtColor(image_ycrcb, cv.COLOR_YCrCb2RGB).astype(np.uint8)
+    ycrcb[:, :, 0] = clahe.apply(ycrcb[:, :, 0])
+    return cv.cvtColor(ycrcb, cv.COLOR_YCrCb2RGB).astype(np.uint8)
 
 
-def binarize_image(
-    image: np.ndarray,
-    cfg: PreprocessConfig,
-    filter_array=None
-) -> np.ndarray:
+# ------------------------------------------------------------------ #
+#  Step 3 — Binarization                                             #
+# ------------------------------------------------------------------ #
+
+def binarize_image(image, cfg, filter_array=None):
+    """Produce a binary mask of the blue background (blue = 255, rest = 0).
+
+    Steps:
+        1. CLAHE illumination normalisation.
+        2. Adaptive background-color estimation (unless filter_array given).
+        3. HSV / RGB colour mask.
+        4. Morphological open + close cleanup.
     """
-    Produces a binary mask that isolates surgical instruments from the tray background.
-
-    Processing steps:
-      1. Illumination normalisation via CLAHE (see normalize_illumination_clahe) so
-         that shadowed background pixels are not misclassified as tools.
-      2. Background colour estimation from multi-patch sampling (when filter_array
-         is not provided).
-      3. Background masking using per-channel HSV tolerances (H, S, V each have an
-         independent tolerance configured in PreprocessConfig), or a uniform RGB
-         tolerance when cfg.color_filter_method == "rgb".
-      4. Morphological open + close to remove small noise blobs.
-
-    Args:
-        image:        RGB image to binarize, shape (H, W, 3), dtype uint8.
-        cfg:          Configuration parameters (filter method, tolerances, kernels,
-                      CLAHE settings).
-        filter_array: Reference colour for background detection. When None it is
-                      computed automatically from the average colour of peripheral
-                      patches. For HSV mode this must be an HSV triplet; for RGB
-                      mode an RGB triplet.
-
-    Returns:
-        filtered_image: uint8 binary mask, shape (H, W). Tools = 255, background = 0.
-    """
-    # 1) Normalise illumination so shadows do not fool the colour filter
-    image_normalised = normalize_illumination_clahe(
+    image_norm = normalize_illumination_clahe(
         image,
         clip_limit=cfg.clahe_clip_limit,
         tile_grid=cfg.clahe_tile_grid,
     )
 
-    valid_methods = ["hsv", "rgb"]
-    filter_method = cfg.color_filter_method.lower().strip()
+    method = cfg.color_filter_method.lower().strip()
 
     if filter_array is None:
-        patches = get_multi_patches(image=image_normalised, cfg=cfg)
-        filter_array = get_avg_color(patches, cfg=cfg)
-        if filter_method == "hsv":
+        patches = get_multi_patches(image_norm, cfg)
+        filter_array = get_avg_color(patches, cfg)
+        if method == "hsv":
             ref_rgb = np.asarray(filter_array, dtype=np.uint8).reshape(1, 1, 3)
-            filter_array = cv.cvtColor(ref_rgb, cv.COLOR_RGB2HSV).reshape(3,)
-
-    assert filter_method in valid_methods, (
-        f"Method {cfg.color_filter_method} not recognized: choose between HSV or RGB \n"
-    )
+            filter_array = cv.cvtColor(ref_rgb, cv.COLOR_RGB2HSV).reshape(3)
 
     filter_array = np.asarray(filter_array).reshape(-1)
-    assert filter_array.size == 3, f"filter_array must contain 3 values, got shape {np.asarray(filter_array).shape}"
+    assert filter_array.size == 3
 
-    if filter_method == "rgb":
-        tol = float(cfg.color_filter_tolerance_rgb)
-        ref = filter_array.astype(np.float32)
-        delta = np.array([255.0, 255.0, 255.0], dtype=np.float32) * tol
-        lower = np.clip(ref - delta, 0, 255).astype(np.uint8)
-        upper = np.clip(ref + delta, 0, 255).astype(np.uint8)
-        mask_bg = cv.inRange(image_normalised, lower, upper)
+    if method == "rgb":
+        mask_bg = _build_rgb_mask(image_norm, filter_array, cfg)
+    elif method == "hsv":
+        image_hsv = cv.cvtColor(image_norm, cv.COLOR_RGB2HSV)
+        mask_bg = _build_hsv_mask(image_hsv, filter_array, cfg)
     else:
-        image_hsv = cv.cvtColor(image_normalised, cv.COLOR_RGB2HSV)
-        H, S, V = filter_array.astype(np.int32)
-        dH = int(179 * cfg.color_filter_tolerance_h)
-        dS = int(255 * cfg.color_filter_tolerance_s)
-        dV = int(255 * cfg.color_filter_tolerance_v)
-        s_low, s_up = max(S - dS, 0), min(S + dS, 255)
-        v_low, v_up = max(V - dV, 0), min(V + dV, 255)
-        h_low, h_up = H - dH, H + dH
+        raise ValueError(f"Unknown color_filter_method: {method!r}")
 
-        if h_low < 0 or h_up > 179:
-            maskA = cv.inRange(image_hsv,
-                               np.array([0,             s_low, v_low], dtype=np.uint8),
-                               np.array([min(h_up, 179), s_up,  v_up], dtype=np.uint8))
-            maskB = cv.inRange(image_hsv,
-                               np.array([max(h_low + 180, 0), s_low, v_low], dtype=np.uint8),
-                               np.array([179,                  s_up,  v_up], dtype=np.uint8))
-            mask_bg = cv.bitwise_or(maskA, maskB)
-        else:
-            mask_bg = cv.inRange(image_hsv,
-                                 np.array([h_low, s_low, v_low], dtype=np.uint8),
-                                 np.array([h_up,  s_up,  v_up],  dtype=np.uint8))
-
-    # Blue background = 255, everything else = 0
-    open_kernel  = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.open_kernel_dims)
-    close_kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.close_kernel_dims)
-    mask_bg = cv.morphologyEx(mask_bg, cv.MORPH_OPEN,  open_kernel)
-    mask_bg = cv.morphologyEx(mask_bg, cv.MORPH_CLOSE, close_kernel)
+    open_k = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.open_kernel_dims)
+    close_k = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.close_kernel_dims)
+    mask_bg = cv.morphologyEx(mask_bg, cv.MORPH_OPEN, open_k)
+    mask_bg = cv.morphologyEx(mask_bg, cv.MORPH_CLOSE, close_k)
 
     return mask_bg
 
 
-def get_tray_crop(
-    roi_crop: np.ndarray,
-    binary_mask: np.ndarray,
-    full_size_tol: float = 0.99,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Detects the tray boundary from the blue-background binary mask and returns
-    a masked image where only the tray interior is visible.
+# ------------------------------------------------------------------ #
+#  Step 4 — Tray crop                                                #
+# ------------------------------------------------------------------ #
 
-    Finds contours on the binary mask (blue bg = 255). Discards any contour
-    whose bounding rect spans nearly the full ROI (desk/frame artefacts).
-    The largest remaining contour is taken as the tray boundary. A filled
-    contour mask is applied to roi_crop; all pixels outside the tray are zeroed,
-    so the returned image is the same size as the ROI but only shows the tray.
+def get_tray_crop(roi_crop, binary_mask, cfg):
+    """Isolate the tray from the ROI by contour detection.
+
+    Finds the largest contour in binary_mask whose bounding rect is
+    smaller than the full ROI (filtering out desk-border artefacts).
+    Returns a masked image where only the tray interior is visible.
 
     Args:
-        roi_crop:      RGB image, shape (H, W, 3).
-        binary_mask:   uint8 mask from binarize_image (blue bg = 255), shape (H, W).
-        full_size_tol: Fraction of both ROI dimensions above which a contour
-                       bounding rect is treated as a full-image artefact and skipped.
+        roi_crop:    RGB image (H, W, 3).
+        binary_mask: uint8 mask, blue bg = 255.
+        cfg:         PreprocessConfig (uses tray_full_size_tol).
 
     Returns:
-        tray_masked:  RGB image, same shape as roi_crop; non-tray pixels = 0.
-        tray_mask:    uint8 binary mask (H, W); tray interior = 255.
-        tray_contour: Raw contour array of the selected tray boundary.
+        tray_masked:  RGB image, same shape; non-tray pixels = 0.
+        tray_mask:    binary mask (H, W), tray = 255.
+        tray_contour: selected contour array.
     """
     H, W = roi_crop.shape[:2]
+    tol = cfg.tray_full_size_tol
 
-    contours, _ = cv.findContours(binary_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv.findContours(
+        binary_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE
+    )
     if not contours:
         raise ValueError("No contours found in binary mask.")
 
     tray_contour = None
-    best_area    = -1
-
+    best_area = -1
     for cnt in contours:
-        x, y, cw, ch = cv.boundingRect(cnt)
-        if cw >= full_size_tol * W and ch >= full_size_tol * H:
-            continue                    # skip full-ROI-sized artefacts (desk border)
+        _, _, cw, ch = cv.boundingRect(cnt)
+        if cw >= tol * W and ch >= tol * H:
+            continue
         area = cv.contourArea(cnt)
         if area > best_area:
-            best_area    = area
+            best_area = area
             tray_contour = cnt
 
     if tray_contour is None:
-        raise ValueError(
-            "No valid tray contour found — every contour spans the full ROI. "
-            "Try reducing full_size_tol or adjusting binarization tolerances."
-        )
+        raise ValueError("No valid tray contour found.")
 
-    # Fill the contour on a black canvas → tray mask
     tray_mask = np.zeros((H, W), dtype=np.uint8)
     cv.drawContours(tray_mask, [tray_contour], -1, 255, thickness=cv.FILLED)
 
-    # Zero out everything outside the tray
     tray_masked = cv.bitwise_and(roi_crop, roi_crop, mask=tray_mask)
-
     return tray_masked, tray_mask, tray_contour
 
 
-# ================================================================== #
-# Main                                                               #
-# ================================================================== #
-def main(debugging: bool = False):
+# ------------------------------------------------------------------ #
+#  Step 5 — Blue background removal (H-only)                        #
+# ------------------------------------------------------------------ #
+
+def remove_blue_background(tray_masked, cfg, bg_rgb=None):
+    """Zero out blue-background pixels using only the H channel.
+
+    Matching on H alone means shadows (which shift S and V but not H)
+    are never misclassified as foreground. The reference hue comes from
+    the same adaptive estimate used in ROI detection.
+
+    Args:
+        tray_masked: RGB image, output of get_tray_crop (H, W, 3).
+        cfg:         PreprocessConfig (uses color_filter_tolerance_h).
+        bg_rgb:      Background colour as RGB uint8 (3,). When None it
+                     is computed from patches of tray_masked — the black
+                     border pixels are excluded automatically by the HSV
+                     limits in get_avg_color, so the estimate is stable.
+
+    Returns:
+        RGB image same shape as tray_masked; blue-background pixels = 0.
+    """
+    if bg_rgb is None:
+        bg_rgb = get_avg_color(get_multi_patches(tray_masked, cfg), cfg)
+
+    bg_rgb = np.asarray(bg_rgb, dtype=np.uint8).reshape(1, 1, 3)
+    H0 = int(cv.cvtColor(bg_rgb, cv.COLOR_RGB2HSV)[0, 0, 0])
+
+    dH    = int(179 * cfg.color_filter_tolerance_h)
+    h_low = H0 - dH
+    h_up  = H0 + dH
+
+    H_ch = cv.cvtColor(tray_masked, cv.COLOR_RGB2HSV)[:, :, 0]
+
+    if h_low < 0 or h_up > 179:
+        is_bg = (H_ch <= min(h_up, 179)) | (H_ch >= max(h_low + 180, 0))
+    else:
+        is_bg = (H_ch >= h_low) & (H_ch <= h_up)
+
+    result = tray_masked.copy()
+    result[is_bg] = 0
+    return result
+
+
+# ------------------------------------------------------------------ #
+#  Debug entry point                                                 #
+# ------------------------------------------------------------------ #
+
+def main(debugging=False):
     cfg = PreprocessConfig()
 
-    # -- Load images --
-    # debug=True (set in PreprocessConfig): loads one random image.
-    # debug=False: loads all images, using a disk cache at ./cache/images.pkl.
     tray_images = load_images("./Trays", cfg)
     if not tray_images:
         raise FileNotFoundError("No images found in ./Trays")
 
     img_rgb = tray_images[np.random.randint(0, len(tray_images))]
 
-    # -- ROI detection --
-    roi_crop, roi_mask, roi_bbox = get_ROI_from_color(img_rgb, cfg)
-    # -- Binarization --
-    binary_mask = binarize_image(roi_crop, cfg)
-    # -- Tray crop --
-    tray_masked, tray_mask, tray_contour = get_tray_crop(roi_crop, binary_mask)
+    # Pipeline
+    roi_crop, roi_mask, roi_bbox           = get_ROI_from_color(img_rgb, cfg)
+    binary_mask                            = binarize_image(roi_crop, cfg)
+    tray_masked, tray_mask, tray_contour   = get_tray_crop(roi_crop, binary_mask, cfg)
+    tray_no_bg                             = remove_blue_background(tray_masked, cfg)
 
-    # -- Debug visualizations --
     if debugging:
-        # ROI on original image
         x0, y0, w, h = roi_bbox
         viz = img_rgb.copy()
-        cv.rectangle(viz, (x0, y0), (x0+w, y0+h), (0, 255, 0), thickness=8)
+        cv.rectangle(viz, (x0, y0), (x0 + w, y0 + h), (0, 255, 0), thickness=8)
 
-        # Draw all contours + highlight the selected tray contour
-        contours, _ = cv.findContours(binary_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv.findContours(
+            binary_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE
+        )
         contour_viz = cv.cvtColor(roi_crop.copy(), cv.COLOR_RGB2BGR)
-        cv.drawContours(contour_viz, contours,      -1, (0, 0, 255), thickness=3)
+        cv.drawContours(contour_viz, contours, -1, (0, 0, 255), thickness=3)
         cv.drawContours(contour_viz, [tray_contour], 0, (0, 255, 0), thickness=5)
         contour_viz = cv.cvtColor(contour_viz, cv.COLOR_BGR2RGB)
 
-        fig, axs = plt.subplots(1, 5, figsize=(30, 6))
+        fig, axs = plt.subplots(1, 6, figsize=(36, 6))
+        titles = [
+            "ROI bounding box", "ROI crop",
+            "Blue background mask", f"Contours ({len(contours)} total)",
+            "Tray masked", "Background removed (H only)",
+        ]
+        images = [viz, roi_crop, binary_mask, contour_viz, tray_masked, tray_no_bg]
+        cmaps  = [None, None, "gray", None, None, None]
 
-        axs[0].imshow(viz)
-        axs[0].set_title("ROI bounding box")
-        axs[0].axis("off")
-
-        axs[1].imshow(roi_crop)
-        axs[1].set_title("ROI crop")
-        axs[1].axis("off")
-
-        axs[2].imshow(binary_mask, cmap="gray")
-        axs[2].set_title("Blue background mask (white=blue bg)")
-        axs[2].axis("off")
-
-        axs[3].imshow(contour_viz)
-        axs[3].set_title(f"Contours — tray in green ({len(contours)} total)")
-        axs[3].axis("off")
-
-        axs[4].imshow(tray_masked)
-        axs[4].set_title("Tray masked (black = outside tray)")
-        axs[4].axis("off")
+        for ax, im, title, cmap in zip(axs, images, titles, cmaps):
+            ax.imshow(im, cmap=cmap)
+            ax.set_title(title)
+            ax.axis("off")
 
         plt.tight_layout()
         plt.show()
 
-    return roi_crop, binary_mask, tray_masked, tray_mask, roi_bbox
+    return roi_crop, binary_mask, tray_masked, tray_mask, tray_no_bg, roi_bbox
+
 
 if __name__ == "__main__":
     main(debugging=True)

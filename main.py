@@ -2,24 +2,24 @@
 import numpy as np
 from config          import PreprocessConfig
 from utils           import load_images
-from preprocess      import get_ROI_from_color, binarize_image
+from preprocess      import get_ROI_from_color, binarize_image, get_tray_crop, remove_blue_background
 from segmentation    import segment_instruments
 
 def main():
     cfg = PreprocessConfig()
 
     # -- Image Loading --
-    # debug=True (set in PreprocessConfig): loads one random image.
-    # debug=False: loads all images, using a disk cache at ./cache/images.pkl.
     images = load_images("./Trays", cfg)
     img_rgb = images[np.random.randint(0, len(images))]
 
     # -- Preprocessing --
     roi_crop, roi_mask, roi_bbox = get_ROI_from_color(img_rgb, cfg)
     binary_mask = binarize_image(roi_crop, cfg)
+    tray_masked, tray_mask, _ = get_tray_crop(roi_crop, binary_mask, cfg)
+    tray_no_bg                = remove_blue_background(tray_masked, cfg)
 
     # -- Segmentation  --
-    contours = segment_instruments(roi_crop, binary_mask, cfg)
+    seg_binary, bboxes = segment_instruments(tray_no_bg, cfg)
 
 if __name__ == "__main__":
     main()
