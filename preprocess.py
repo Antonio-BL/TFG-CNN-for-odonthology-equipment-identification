@@ -153,6 +153,35 @@ def normalize_illumination_clahe(image, clip_limit=2.0, tile_grid=(8, 8)):
 
 
 # ------------------------------------------------------------------ #
+#  Step 2b — Specular reflection detection                           #
+# ------------------------------------------------------------------ #
+
+def detect_specular_reflections(image, cfg):
+    """Detect specular highlights (bright white reflections on metallic surfaces).
+
+    Uses HSV thresholding:
+    - High Value (V > threshold): brightness
+    - Low Saturation (S < threshold): white (no color)
+
+    Args:
+        image: RGB uint8 (H, W, 3).
+        cfg:   PreprocessConfig (uses reflection_v_threshold, reflection_s_threshold).
+
+    Returns:
+        reflection_mask: uint8 binary mask (H, W), reflections = 255.
+    """
+    image_hsv = cv.cvtColor(image, cv.COLOR_RGB2HSV)
+    H_ch, S_ch, V_ch = cv.split(image_hsv)
+
+    # High brightness + low saturation = specular reflection
+    v_mask = V_ch > cfg.reflection_v_threshold
+    s_mask = S_ch < cfg.reflection_s_threshold
+    reflection_mask = (v_mask & s_mask).astype(np.uint8) * 255
+
+    return reflection_mask
+
+
+# ------------------------------------------------------------------ #
 #  Step 3 — Binarization                                             #
 # ------------------------------------------------------------------ #
 
@@ -261,9 +290,12 @@ def remove_blue_background(tray_masked, cfg, bg_rgb=None):
     are never misclassified as foreground. The reference hue comes from
     the same adaptive estimate used in ROI detection.
 
+    Specular reflections (bright white highlights) are detected and excluded
+    from background classification. Optionally they are removed from output.
+
     Args:
         tray_masked: RGB image, output of get_tray_crop (H, W, 3).
-        cfg:         PreprocessConfig (uses color_filter_tolerance_h).
+        cfg:         PreprocessConfig (uses color_filter_tolerance_h and reflection params).
         bg_rgb:      Background colour as RGB uint8 (3,). When None it
                      is computed from patches of tray_masked — the black
                      border pixels are excluded automatically by the HSV
@@ -272,8 +304,18 @@ def remove_blue_background(tray_masked, cfg, bg_rgb=None):
     Returns:
         RGB image same shape as tray_masked; blue-background pixels = 0.
     """
+    # Apply CLAHE to enhance contrast before background removal
+    image_clahe = normalize_illumination_clahe(
+        tray_masked,
+        clip_limit=cfg.clahe_clip_limit,
+        tile_grid=cfg.clahe_tile_grid,
+    )
+
+    # Detect specular reflections
+    reflection_mask = detect_specular_reflections(image_clahe, cfg)
+
     if bg_rgb is None:
-        bg_rgb = get_avg_color(get_multi_patches(tray_masked, cfg), cfg)
+        bg_rgb = get_avg_color(get_multi_patches(image_clahe, cfg), cfg)
 
     bg_rgb = np.asarray(bg_rgb, dtype=np.uint8).reshape(1, 1, 3)
     H0 = int(cv.cvtColor(bg_rgb, cv.COLOR_RGB2HSV)[0, 0, 0])
@@ -282,15 +324,23 @@ def remove_blue_background(tray_masked, cfg, bg_rgb=None):
     h_low = H0 - dH
     h_up  = H0 + dH
 
-    H_ch = cv.cvtColor(tray_masked, cv.COLOR_RGB2HSV)[:, :, 0]
+    H_ch = cv.cvtColor(image_clahe, cv.COLOR_RGB2HSV)[:, :, 0]
 
     if h_low < 0 or h_up > 179:
         is_bg = (H_ch <= min(h_up, 179)) | (H_ch >= max(h_low + 180, 0))
     else:
         is_bg = (H_ch >= h_low) & (H_ch <= h_up)
 
+    # Exclude reflections from background classification
+    is_bg = is_bg & (reflection_mask == 0)
+
     result = tray_masked.copy()
     result[is_bg] = 0
+
+    # Optionally remove reflections from output
+    if cfg.remove_reflections:
+        result[reflection_mask == 255] = 0
+
     return result
 
 

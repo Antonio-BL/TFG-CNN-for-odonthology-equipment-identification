@@ -47,6 +47,11 @@ class PreprocessConfig:
     # -- Tray crop (get_tray_crop) --
     tray_full_size_tol: float = 0.99
 
+    # -- Specular reflection detection (detect_specular_reflections) --
+    reflection_v_threshold: int = 240
+    reflection_s_threshold: int = 30
+    remove_reflections: bool = True
+
     # -- Segmentation (segment_instruments) --
     seg_close_kernel_dims: tuple[int, int] = (16, 16)
     seg_min_contour_area: int = 500
