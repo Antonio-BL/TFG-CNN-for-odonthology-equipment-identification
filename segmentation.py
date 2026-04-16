@@ -13,7 +13,6 @@ if platform.system() == "Linux":
     os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
 from config     import PreprocessConfig
-from utils      import load_images
 from preprocess import (get_ROI_from_color, binarize_image, get_tray_crop,
                         remove_blue_background, detect_specular_reflections)
 
@@ -229,58 +228,62 @@ def segment_instruments(tray_no_bg, cfg):
 #  Visualisation                                                      #
 # ------------------------------------------------------------------ #
 
-def visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes, reflection_mask=None):
+def visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes,
+                      reflection_mask=None, image_label=None):
     """Plot: original tray | reflections | background-removed | Otsu binary | bounding boxes."""
     n_plots = 5 if reflection_mask is not None else 4
-    figsize = (35, 7) if reflection_mask is not None else (28, 7)
-    fig, axs = plt.subplots(1, n_plots, figsize=figsize)
+    ncols = 3
+    nrows = -(-n_plots // ncols)  # ceiling division
+    fig, axs = plt.subplots(nrows, ncols, figsize=(18, 6 * nrows))
+    if image_label:
+        fig.suptitle(image_label, fontsize=13, fontweight="bold")
+    axs.flat[0].imshow(tray_masked)
+    axs.flat[0].set_title("Original tray masked")
+    axs.flat[0].axis("off")
 
-    axs[0].imshow(tray_masked)
-    axs[0].set_title("Original tray masked")
-    axs[0].axis("off")
-
+    idx = 1
     if reflection_mask is not None:
-        axs[1].imshow(reflection_mask, cmap="gray")
-        axs[1].set_title("Specular reflections")
-        axs[1].axis("off")
-        offset = 1
-    else:
-        offset = 0
+        axs.flat[idx].imshow(reflection_mask, cmap="gray")
+        axs.flat[idx].set_title("Specular reflections")
+        axs.flat[idx].axis("off")
+        idx += 1
 
-    axs[1 + offset].imshow(tray_no_bg)
-    axs[1 + offset].set_title("Background removed (H only)")
-    axs[1 + offset].axis("off")
+    axs.flat[idx].imshow(tray_no_bg)
+    axs.flat[idx].set_title("Background removed (H only)")
+    axs.flat[idx].axis("off")
+    idx += 1
 
-    axs[2 + offset].imshow(seg_binary, cmap="gray")
-    axs[2 + offset].set_title("Otsu binary mask")
-    axs[2 + offset].axis("off")
+    axs.flat[idx].imshow(seg_binary, cmap="gray")
+    axs.flat[idx].set_title("Otsu binary mask")
+    axs.flat[idx].axis("off")
+    idx += 1
 
-    axs[3 + offset].imshow(tray_no_bg)
-    axs[3 + offset].set_title(f"Bounding boxes ({len(bboxes)} instruments)")
-    axs[3 + offset].axis("off")
+    bbox_ax = axs.flat[idx]
+    bbox_ax.imshow(tray_no_bg)
+    bbox_ax.set_title(f"Bounding boxes ({len(bboxes)} instruments)")
+    bbox_ax.axis("off")
 
     for i, (center, size, angle, area) in enumerate(bboxes):
-        # Convert minAreaRect to corner points for drawing
         box_points = cv.boxPoints(((center[0], center[1]), size, angle))
         box_points = np.int32(box_points)
-
-        # Draw rotated rectangle
         polygon = mpatches.Polygon(
             box_points, closed=True,
             linewidth=2, edgecolor="lime", facecolor="none"
         )
-        axs[3 + offset].add_patch(polygon)
-
-        # Label at top-left corner
+        bbox_ax.add_patch(polygon)
         w, h = size
-        axs[3 + offset].text(
+        bbox_ax.text(
             center[0], center[1] - 20,
             f"#{i+1}  {w:.0f}x{h:.0f}  {angle:.1f}°  ({area:,} px)",
             color="lime", fontsize=7, fontweight="bold",
             bbox=dict(facecolor="black", alpha=0.45, pad=1, edgecolor="none"),
         )
 
-    plt.tight_layout()
+    # Hide any unused cells
+    for ax in list(axs.flat)[n_plots:]:
+        ax.axis("off")
+
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.show()
 
 
@@ -288,14 +291,26 @@ def visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes, reflection_ma
 #  Entry point                                                        #
 # ------------------------------------------------------------------ #
 
-def main(debugging=False):
+def main(debugging=False, image_path=None):
     cfg = PreprocessConfig()
 
-    tray_images = load_images("./Trays", cfg)
-    if not tray_images:
-        raise FileNotFoundError("No images found in ./Trays")
+    if image_path is None:
+        all_paths = [
+            os.path.join(wd, f)
+            for wd, _, files in os.walk("./Trays")
+            for f in files
+        ]
+        if not all_paths:
+            raise FileNotFoundError("No images found in ./Trays")
+        image_path = all_paths[np.random.randint(0, len(all_paths))]
 
-    img_rgb = tray_images[np.random.randint(0, len(tray_images))]
+    img_bgr = cv.imread(image_path)
+    if img_bgr is None:
+        raise FileNotFoundError(f"Could not load image: {image_path}")
+    img_rgb = cv.cvtColor(img_bgr, cv.COLOR_BGR2RGB)
+    img_rgb = cv.resize(img_rgb, cfg.image_dims, interpolation=cv.INTER_AREA)
+    image_label = os.path.basename(image_path)
+    print(f"[debug] Loaded image: {image_path}")
 
     # Preprocessing pipeline
     roi_crop, roi_mask, roi_bbox         = get_ROI_from_color(img_rgb, cfg)
@@ -314,10 +329,12 @@ def main(debugging=False):
         print(f"  #{i+1}  center=({cx:.1f}, {cy:.1f})  size={w:.1f}x{h:.1f}  angle={angle:.1f}°  area={area:,} px")
 
     if debugging:
-        visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes, reflection_mask)
+        visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes,
+                          reflection_mask, image_label=image_label)
 
     return tray_no_bg, seg_binary, bboxes
 
 
 if __name__ == "__main__":
-    main(debugging=True)
+    IMAGE_PATH = "Trays\IMG_3358.jpg" # "./Trays"   # set to a path string to load a specific image, e.g. 
+    main(debugging=True, image_path=IMAGE_PATH)

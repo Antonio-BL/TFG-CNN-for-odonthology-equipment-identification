@@ -42,15 +42,20 @@ class PreprocessConfig:
 
     # -- Binarization (binarize_image) --
     open_kernel_dims: tuple[int, int] = (3, 3)
-    close_kernel_dims: tuple[int, int] = (10, 10)
+    close_kernel_dims: tuple[int, int] = (7, 7)
+    bin_tolerance_h: float = 0.07
+    bin_tolerance_s: float = 0.20
+    bin_tolerance_v: float = 1.00
 
     # -- Tray crop (get_tray_crop) --
     tray_full_size_tol: float = 0.99
+    tray_edge_close_kernel: int = 40
 
-    # -- Specular reflection detection (detect_specular_reflections) --
+    # -- Specular reflection detection / repair (detect_specular_reflections) --
     reflection_v_threshold: int = 240
     reflection_s_threshold: int = 30
     remove_reflections: bool = True
+    reflection_inpaint_radius: int = 15
 
     # -- Segmentation (segment_instruments) --
     seg_close_kernel_dims: tuple[int, int] = (16, 16)
