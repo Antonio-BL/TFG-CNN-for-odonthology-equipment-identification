@@ -2,6 +2,7 @@
 # Segments surgical instruments from the background-removed tray image.
 # Pipeline: binarize (Otsu) -> contour detection -> bounding boxes -> visualise
 
+import io
 import os
 import platform
 import numpy as np
@@ -10,7 +11,8 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
 if platform.system() == "Linux":
-    os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+    os.environ["QT_QPA_PLATFORM"] = "xcb" # Force x11 on wayland DEs
+    os.environ["DISPLAY"] = os.environ.get("DISPLAY", ":0")
 
 from config     import PreprocessConfig
 from preprocess import (get_ROI_from_color, binarize_image, get_tray_crop,
@@ -201,6 +203,84 @@ def _filter_by_median_area(bboxes, threshold):
 
 
 # ------------------------------------------------------------------ #
+#  Step 5 — Outlier detection (median-area filter)                   #
+# ------------------------------------------------------------------ #
+
+def _compute_bbox_stats(binary, bbox):
+    """Compute per-bbox statistics used for outlier detection and future SVM features.
+
+    Returns a dict with:
+      contour_area    – area of the contour polygon (px²)
+      bbox_area       – oriented bounding-box area  w × h  (px²)
+      width, height   – sides of the oriented bbox  (px)
+      fill_ratio      – contour_area / bbox_area  (0–1)
+      positive_pixels – white pixels inside the oriented bbox from binary mask
+    """
+    center, size, angle, contour_area = bbox
+    w, h = size
+    bbox_area = float(w * h)
+
+    box_pts = cv.boxPoints(((center[0], center[1]), size, angle))
+    box_pts = np.int32(box_pts)
+    roi_mask = np.zeros(binary.shape[:2], dtype=np.uint8)
+    cv.fillPoly(roi_mask, [box_pts], 255)
+    positive_pixels = int(np.count_nonzero(cv.bitwise_and(binary, roi_mask)))
+
+    return {
+        'contour_area':    contour_area,
+        'bbox_area':       bbox_area,
+        'width':           float(w),
+        'height':          float(h),
+        'fill_ratio':      contour_area / bbox_area if bbox_area > 0 else 0.0,
+        'positive_pixels': positive_pixels,
+    }
+
+
+def _analyze_bbox_outliers(binary, bboxes, area_ratio_threshold=2.0):
+    """Classify bboxes into normal and outlier groups based on their area
+    relative to the median.
+
+    A bbox is an outlier when  contour_area > area_ratio_threshold × median_area.
+
+    Scenarios
+    ---------
+    'none'     – no bbox exceeds the threshold; instruments are uniformly sized.
+    'single'   – exactly one outlier; likely two touching instruments fused.
+    'multiple' – two or more outliers; multiple fused or unusually large regions.
+
+    Returns
+    -------
+    dict with keys:
+      'scenario'    : 'none' | 'single' | 'multiple'
+      'outliers'    : list of {'bbox': ..., **stats}  – outlier entries
+      'normal'      : list of {'bbox': ..., **stats}  – non-outlier entries
+      'median_area' : float
+    """
+    if not bboxes:
+        return {'scenario': 'none', 'outliers': [], 'normal': [], 'median_area': 0.0}
+
+    median_area = float(np.median([b[3] for b in bboxes]))
+    cutoff      = area_ratio_threshold * median_area
+
+    outliers, normal = [], []
+    for bbox in bboxes:
+        stats = _compute_bbox_stats(binary, bbox)
+        entry = {'bbox': bbox, **stats}
+        (outliers if bbox[3] > cutoff else normal).append(entry)
+
+    if   len(outliers) == 0: scenario = 'none'
+    elif len(outliers) == 1: scenario = 'single'
+    else:                    scenario = 'multiple'
+
+    return {
+        'scenario':    scenario,
+        'outliers':    outliers,
+        'normal':      normal,
+        'median_area': median_area,
+    }
+
+
+# ------------------------------------------------------------------ #
 #  Public API                                                         #
 # ------------------------------------------------------------------ #
 
@@ -216,12 +296,13 @@ def segment_instruments(tray_no_bg, cfg):
         seg_binary: uint8 binary mask (H, W); instruments = 255.
         bboxes:     list of (x, y, w, h, area), sorted largest-first.
     """
-    tray_closed = _connect_edges(tray_no_bg, cfg)
-    seg_binary  = _binarize_tray(tray_closed)
-    seg_binary  = _apply_knn_clustering(seg_binary, distance_threshold=50, size_ratio_threshold=0.5)
-    bboxes      = _find_bboxes(seg_binary, cfg.seg_min_contour_area)
-    bboxes      = _filter_by_median_area(bboxes, cfg.seg_median_area_threshold)
-    return seg_binary, bboxes
+    tray_closed      = _connect_edges(tray_no_bg, cfg)
+    seg_binary       = _binarize_tray(tray_closed)
+    seg_binary       = _apply_knn_clustering(seg_binary, distance_threshold=50, size_ratio_threshold=0.5)
+    bboxes           = _find_bboxes(seg_binary, cfg.seg_min_contour_area)
+    bboxes           = _filter_by_median_area(bboxes, cfg.seg_median_area_threshold)
+    outlier_analysis = _analyze_bbox_outliers(seg_binary, bboxes, cfg.seg_outlier_area_ratio)
+    return seg_binary, bboxes, outlier_analysis
 
 
 # ------------------------------------------------------------------ #
@@ -229,7 +310,7 @@ def segment_instruments(tray_no_bg, cfg):
 # ------------------------------------------------------------------ #
 
 def visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes,
-                      reflection_mask=None, image_label=None):
+                      reflection_mask=None, image_label=None, outlier_analysis=None):
     """Plot: original tray | reflections | background-removed | Otsu binary | bounding boxes."""
     n_plots = 5 if reflection_mask is not None else 4
     ncols = 3
@@ -263,19 +344,28 @@ def visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes,
     bbox_ax.set_title(f"Bounding boxes ({len(bboxes)} instruments)")
     bbox_ax.axis("off")
 
-    for i, (center, size, angle, area) in enumerate(bboxes):
+    outlier_bboxes = set()
+    if outlier_analysis and outlier_analysis['outliers']:
+        outlier_bboxes = {id(e['bbox']) for e in outlier_analysis['outliers']}
+
+    for i, bbox in enumerate(bboxes):
+        center, size, angle, area = bbox
+        is_outlier = id(bbox) in outlier_bboxes
+        colour = "red" if is_outlier else "lime"
         box_points = cv.boxPoints(((center[0], center[1]), size, angle))
         box_points = np.int32(box_points)
         polygon = mpatches.Polygon(
             box_points, closed=True,
-            linewidth=2, edgecolor="lime", facecolor="none"
+            linewidth=2, edgecolor=colour, facecolor="none"
         )
         bbox_ax.add_patch(polygon)
         w, h = size
+        label = f"#{i+1}  {w:.0f}x{h:.0f}  {angle:.1f}°  ({area:,} px)"
+        if is_outlier:
+            label += "  ⚠ outlier"
         bbox_ax.text(
-            center[0], center[1] - 20,
-            f"#{i+1}  {w:.0f}x{h:.0f}  {angle:.1f}°  ({area:,} px)",
-            color="lime", fontsize=7, fontweight="bold",
+            center[0], center[1] - 20, label,
+            color=colour, fontsize=7, fontweight="bold",
             bbox=dict(facecolor="black", alpha=0.45, pad=1, edgecolor="none"),
         )
 
@@ -284,7 +374,31 @@ def visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes,
         ax.axis("off")
 
     plt.tight_layout(rect=[0, 0, 1, 0.96])
-    plt.show()
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=96, bbox_inches='tight')
+    buf.seek(0)
+    img = cv.imdecode(np.frombuffer(buf.getvalue(), dtype=np.uint8), cv.IMREAD_COLOR)
+    plt.close()
+
+    try:
+        import subprocess, re
+        xrandr_out = subprocess.run(['xrandr', '--current'], capture_output=True, text=True).stdout
+        m = re.search(r'(\d+)x(\d+)\+0\+0', xrandr_out)
+        sw, sh = (int(m.group(1)), int(m.group(2))) if m else (1920, 1080)
+    except Exception:
+        sw, sh = 1920, 1080
+
+    h, w = img.shape[:2]
+    scale = min((sw - 80) / w, (sh - 80) / h, 1.0)
+    if scale < 1.0:
+        img = cv.resize(img, (int(w * scale), int(h * scale)), interpolation=cv.INTER_AREA)
+
+    cv.namedWindow("Debug", cv.WINDOW_NORMAL)
+    cv.imshow("Debug", img)
+    cv.resizeWindow("Debug", img.shape[1], img.shape[0])
+    cv.waitKey(0)
+    cv.destroyAllWindows()
 
 
 # ------------------------------------------------------------------ #
@@ -320,21 +434,25 @@ def main(debugging=False, image_path=None):
     tray_no_bg                           = remove_blue_background(tray_masked, cfg)
 
     # Segmentation
-    seg_binary, bboxes = segment_instruments(tray_no_bg, cfg)
+    seg_binary, bboxes, outlier_analysis = segment_instruments(tray_no_bg, cfg)
 
-    print(f"Found {len(bboxes)} instrument(s):")
-    for i, (center, size, angle, area) in enumerate(bboxes):
+    print(f"Found {len(bboxes)} instrument(s)  [outlier scenario: {outlier_analysis['scenario']}]")
+    outlier_bboxes = {id(e['bbox']) for e in outlier_analysis['outliers']}
+    for i, bbox in enumerate(bboxes):
+        center, size, angle, area = bbox
         cx, cy = center
         w, h = size
-        print(f"  #{i+1}  center=({cx:.1f}, {cy:.1f})  size={w:.1f}x{h:.1f}  angle={angle:.1f}°  area={area:,} px")
+        flag = "  ⚠ OUTLIER" if id(bbox) in outlier_bboxes else ""
+        print(f"  #{i+1}  center=({cx:.1f}, {cy:.1f})  size={w:.1f}x{h:.1f}  angle={angle:.1f}°  area={area:,} px{flag}")
 
     if debugging:
         visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes,
-                          reflection_mask, image_label=image_label)
+                          reflection_mask, image_label=image_label,
+                          outlier_analysis=outlier_analysis)
 
-    return tray_no_bg, seg_binary, bboxes
+    return tray_no_bg, seg_binary, bboxes, outlier_analysis
 
 
 if __name__ == "__main__":
-    IMAGE_PATH = "Trays\IMG_3358.jpg" # "./Trays"   # set to a path string to load a specific image, e.g. 
+    IMAGE_PATH = None # "./Trays"   # set to a path string to load a specific image, e.g. 
     main(debugging=True, image_path=IMAGE_PATH)

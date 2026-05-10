@@ -61,3 +61,4 @@ class PreprocessConfig:
     seg_close_kernel_dims: tuple[int, int] = (16, 16)
     seg_min_contour_area: int = 500
     seg_median_area_threshold: float = 0.2
+    seg_outlier_area_ratio: float = 2.0   # bbox area > ratio * median → outlier candidate
