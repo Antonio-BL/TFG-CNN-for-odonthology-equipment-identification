@@ -48,7 +48,10 @@ def _binarize_tray(tray_no_bg):
 # ------------------------------------------------------------------ #
 
 def _apply_knn_clustering(binary, distance_threshold=50, size_ratio_threshold=0.5):
-    """Gently merge only nearby small contour fragments.
+    """
+    NOT APPLIED-- AGGRAVATES OVERLAPPING ERRORS --
+    
+    Gently merge only nearby small contour fragments.
 
     This approach only merges small contours (below median area) that are
     very close to each other, avoiding aggressive over-merging. Uses distance-based
@@ -185,21 +188,44 @@ def _find_bboxes(binary, min_area):
 #  Step 4 — Median-area outlier filter                               #
 # ------------------------------------------------------------------ #
 
-def _filter_by_median_area(bboxes, threshold):
-    """Discard bounding boxes whose area is below `threshold` * median area.
+def _filter_by_median_area(bboxes, binary, threshold):
+    """Discard bounding boxes below `threshold` × median of the effective bbox area.
+
+    The filter metric is  positive_pixels / fill_ratio  which simplifies to
+    the oriented-bbox area (w × h).  This is deliberately different from the
+    contour polygon area stored in b[3]: a thin diagonal instrument has a small
+    polygon area but a large oriented-bbox footprint, and we want to keep it.
 
     Args:
         bboxes:    list of (center, size, angle, area).
-        threshold: fraction of the median area used as the lower bound.
+        binary:    uint8 binary mask used to count positive pixels per bbox.
+        threshold: fraction of the median metric used as the lower bound.
 
     Returns:
         Filtered list, same format, same ordering.
     """
     if not bboxes:
         return bboxes
-    median_area = np.median([b[3] for b in bboxes])
-    min_area    = threshold * median_area
-    return [b for b in bboxes if b[3] >= min_area]
+
+    def _effective_area(bbox):
+        stats = _compute_bbox_stats(binary, bbox)
+        fill_ratio = stats['fill_ratio']
+        if fill_ratio <= 0:
+            return 0.0
+        return stats['positive_pixels'] / fill_ratio  # == bbox_area (w × h)
+
+    metrics     = [_effective_area(b) for b in bboxes]
+    median_val  = float(np.median(metrics))
+    min_val     = threshold * median_val
+    per_bbox    = {id(b): m for b, m in zip(bboxes, metrics)}
+    filtered    = [b for b, m in zip(bboxes, metrics) if m >= min_val]
+    filter_stats = {
+        'median':    median_val,
+        'threshold': threshold,
+        'cutoff':    min_val,
+        'per_bbox':  per_bbox,
+    }
+    return filtered, filter_stats
 
 
 # ------------------------------------------------------------------ #
@@ -212,6 +238,7 @@ def _compute_bbox_stats(binary, bbox):
     Returns a dict with:
       contour_area    – area of the contour polygon (px²)
       bbox_area       – oriented bounding-box area  w × h  (px²)
+      perimeter       – oriented bounding-box perimeter  2*(w+h)  (px)
       width, height   – sides of the oriented bbox  (px)
       fill_ratio      – contour_area / bbox_area  (0–1)
       positive_pixels – white pixels inside the oriented bbox from binary mask
@@ -229,6 +256,7 @@ def _compute_bbox_stats(binary, bbox):
     return {
         'contour_area':    contour_area,
         'bbox_area':       bbox_area,
+        'perimeter':       float(2 * (w + h)),
         'width':           float(w),
         'height':          float(h),
         'fill_ratio':      contour_area / bbox_area if bbox_area > 0 else 0.0,
@@ -236,47 +264,83 @@ def _compute_bbox_stats(binary, bbox):
     }
 
 
-def _analyze_bbox_outliers(binary, bboxes, area_ratio_threshold=2.0):
-    """Classify bboxes into normal and outlier groups based on their area
-    relative to the median.
+def _analyze_bbox_outliers(binary, bboxes,
+                           aspect_ratio_threshold=2.0,
+                           area_ratio_threshold=2.5):
+    """Classify bboxes into normal and outlier groups using a two-criterion AND gate.
 
-    A bbox is an outlier when  contour_area > area_ratio_threshold × median_area.
+    A bbox is flagged as an outlier only when BOTH conditions hold:
+      1. aspect_ratio (min(w,h) / max(w,h)) > aspect_ratio_threshold  × median aspect ratio
+      2. bbox_area    (w × h)               > area_ratio_threshold     × median bbox area
+
+    aspect_ratio (short/long, always in [0, 1]) is scale-invariant: it measures
+    shape bloat regardless of image resolution or absolute instrument size. A
+    fused pair of instruments is wider relative to its length than any single
+    tool, so its aspect ratio rises above the median even when the image is
+    downscaled.
+
+    bbox_area acts as an absolute size guard: compact tools such as scissors
+    naturally have a higher aspect ratio (they are less elongated) but their
+    bbox_area stays near the median. The area criterion prevents those from
+    being falsely flagged — they fail criterion 2 even when they pass criterion 1.
+
+    The AND gate separates the two cases cleanly:
+      - Fused instruments : both criteria fire   → flagged as outlier
+      - Compact tool      : high aspect_ratio but normal bbox_area → NOT flagged
+      - Large slender tool: large bbox_area but low aspect_ratio   → NOT flagged
 
     Scenarios
     ---------
-    'none'     – no bbox exceeds the threshold; instruments are uniformly sized.
+    'none'     – no bbox passes both criteria; no fused instruments detected.
     'single'   – exactly one outlier; likely two touching instruments fused.
     'multiple' – two or more outliers; multiple fused or unusually large regions.
 
     Returns
     -------
     dict with keys:
-      'scenario'    : 'none' | 'single' | 'multiple'
-      'outliers'    : list of {'bbox': ..., **stats}  – outlier entries
-      'normal'      : list of {'bbox': ..., **stats}  – non-outlier entries
-      'median_area' : float
+      'scenario'           : 'none' | 'single' | 'multiple'
+      'outliers'           : list of {'bbox': ..., **stats}
+      'normal'             : list of {'bbox': ..., **stats}
+      'median_bbox_area'   : float  – median bbox area (w×h) across all bboxes
+      'median_aspect_ratio': float  – median aspect ratio across all bboxes (debug)
     """
     if not bboxes:
-        return {'scenario': 'none', 'outliers': [], 'normal': [], 'median_area': 0.0}
+        return {
+            'scenario': 'none', 'outliers': [], 'normal': [],
+            'median_bbox_area': 0.0, 'median_aspect_ratio': 0.0,
+        }
 
-    median_area = float(np.median([b[3] for b in bboxes]))
-    cutoff      = area_ratio_threshold * median_area
+    bbox_areas    = [b[1][0] * b[1][1] for b in bboxes]
+    aspect_ratios = [min(b[1][0], b[1][1]) / max(b[1][0], b[1][1])
+                     if max(b[1][0], b[1][1]) > 0 else 0.0
+                     for b in bboxes]
+
+    median_bbox_area   = float(np.median(bbox_areas))
+    median_aspect_ratio = float(np.median(aspect_ratios))
+
+    area_cutoff   = area_ratio_threshold   * median_bbox_area
+    aspect_cutoff = aspect_ratio_threshold * median_aspect_ratio
 
     outliers, normal = [], []
-    for bbox in bboxes:
+    for bbox, ba, ar in zip(bboxes, bbox_areas, aspect_ratios):
         stats = _compute_bbox_stats(binary, bbox)
         entry = {'bbox': bbox, **stats}
-        (outliers if bbox[3] > cutoff else normal).append(entry)
+        # Both criteria must be exceeded to avoid flagging a single large tool
+        if ar > aspect_cutoff and ba > area_cutoff:
+            outliers.append(entry)
+        else:
+            normal.append(entry)
 
     if   len(outliers) == 0: scenario = 'none'
     elif len(outliers) == 1: scenario = 'single'
     else:                    scenario = 'multiple'
 
     return {
-        'scenario':    scenario,
-        'outliers':    outliers,
-        'normal':      normal,
-        'median_area': median_area,
+        'scenario':            scenario,
+        'outliers':            outliers,
+        'normal':              normal,
+        'median_bbox_area':    median_bbox_area,
+        'median_aspect_ratio': median_aspect_ratio,
     }
 
 
@@ -298,11 +362,14 @@ def segment_instruments(tray_no_bg, cfg):
     """
     tray_closed      = _connect_edges(tray_no_bg, cfg)
     seg_binary       = _binarize_tray(tray_closed)
-    seg_binary       = _apply_knn_clustering(seg_binary, distance_threshold=50, size_ratio_threshold=0.5)
     bboxes           = _find_bboxes(seg_binary, cfg.seg_min_contour_area)
-    bboxes           = _filter_by_median_area(bboxes, cfg.seg_median_area_threshold)
-    outlier_analysis = _analyze_bbox_outliers(seg_binary, bboxes, cfg.seg_outlier_area_ratio)
-    return seg_binary, bboxes, outlier_analysis
+    bboxes, filter_stats = _filter_by_median_area(bboxes, seg_binary, cfg.seg_median_area_threshold)
+    outlier_analysis     = _analyze_bbox_outliers(
+        seg_binary, bboxes,
+        cfg.seg_outlier_aspect_ratio,
+        cfg.seg_outlier_area_ratio,
+    )
+    return seg_binary, bboxes, outlier_analysis, filter_stats
 
 
 # ------------------------------------------------------------------ #
@@ -310,7 +377,8 @@ def segment_instruments(tray_no_bg, cfg):
 # ------------------------------------------------------------------ #
 
 def visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes,
-                      reflection_mask=None, image_label=None, outlier_analysis=None):
+                      reflection_mask=None, image_label=None, outlier_analysis=None,
+                      filter_stats=None):
     """Plot: original tray | reflections | background-removed | Otsu binary | bounding boxes."""
     n_plots = 5 if reflection_mask is not None else 4
     ncols = 3
@@ -369,9 +437,41 @@ def visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes,
             bbox=dict(facecolor="black", alpha=0.45, pad=1, edgecolor="none"),
         )
 
-    # Hide any unused cells
-    for ax in list(axs.flat)[n_plots:]:
+    # Hide any image cells that are unused (spare cells between images and text panel)
+    for ax in list(axs.flat)[n_plots:-1]:
         ax.axis("off")
+
+    # Bottom-right panel: filter stats text (always the last grid cell)
+    text_ax = axs.flat[-1]
+    text_ax.set_xticks([])
+    text_ax.set_yticks([])
+    for spine in text_ax.spines.values():
+        spine.set_visible(False)
+    if filter_stats:
+        text_ax.set_facecolor("#f0f0f0")
+        text_ax.set_title("Median filter stats", fontsize=9)
+        lines = [
+            f"Median : {filter_stats['median']:>12,.1f} px²",
+            f"Thresh : {filter_stats['threshold']:>12.2f} ×",
+            f"Cutoff : {filter_stats['cutoff']:>12,.1f} px²",
+            "",
+            "  #    metric value",
+            "  " + "─" * 22,
+        ]
+        per = filter_stats.get('per_bbox', {})
+        for i, bbox in enumerate(bboxes):
+            val = per.get(id(bbox))
+            val_str = f"{val:>12,.1f} px²" if val is not None else "            n/a"
+            lines.append(f"  #{i + 1:<3}  {val_str}")
+        text_ax.text(
+            0.05, 0.95, "\n".join(lines),
+            transform=text_ax.transAxes,
+            ha='left', va='top',
+            fontsize=8, family='monospace',
+            color='black',
+        )
+    else:
+        text_ax.set_facecolor("#f0f0f0")
 
     plt.tight_layout(rect=[0, 0, 1, 0.96])
 
@@ -434,7 +534,7 @@ def main(debugging=False, image_path=None):
     tray_no_bg                           = remove_blue_background(tray_masked, cfg)
 
     # Segmentation
-    seg_binary, bboxes, outlier_analysis = segment_instruments(tray_no_bg, cfg)
+    seg_binary, bboxes, outlier_analysis, filter_stats = segment_instruments(tray_no_bg, cfg)
 
     print(f"Found {len(bboxes)} instrument(s)  [outlier scenario: {outlier_analysis['scenario']}]")
     outlier_bboxes = {id(e['bbox']) for e in outlier_analysis['outliers']}
@@ -448,11 +548,12 @@ def main(debugging=False, image_path=None):
     if debugging:
         visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes,
                           reflection_mask, image_label=image_label,
-                          outlier_analysis=outlier_analysis)
+                          outlier_analysis=outlier_analysis,
+                          filter_stats=filter_stats)
 
-    return tray_no_bg, seg_binary, bboxes, outlier_analysis
+    return tray_no_bg, seg_binary, bboxes, outlier_analysis, filter_stats
 
 
 if __name__ == "__main__":
-    IMAGE_PATH = None # "./Trays"   # set to a path string to load a specific image, e.g. 
+    IMAGE_PATH = "./Trays/IMG_3376.jpg" # "./Trays"   # set to a path string to load a specific image, e.g. 
     main(debugging=True, image_path=IMAGE_PATH)
