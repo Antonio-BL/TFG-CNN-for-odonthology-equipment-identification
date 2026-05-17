@@ -61,5 +61,4 @@ class PreprocessConfig:
     seg_close_kernel_dims: tuple[int, int] = (16, 16)
     seg_min_contour_area: int = 500
     seg_median_area_threshold: float = 0.2
-    seg_outlier_aspect_ratio: float = 2.0  # aspect ratio (short/long) > 2× median ⇒ candidate (AND with area)
-    seg_outlier_area_ratio:   float = 2.5  # bbox area (w×h) > 2.5× median ⇒ candidate (both must be true to flag)
+    seg_outlier_grade_threshold: float = 1.5  # grade > 1.5× median grade ⇒ outlier (grade = 0.7*norm_area + 0.3*norm_inv_fill)

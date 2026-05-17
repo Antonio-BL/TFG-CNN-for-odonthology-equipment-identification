@@ -18,7 +18,6 @@ from config     import PreprocessConfig
 from preprocess import (get_ROI_from_color, binarize_image, get_tray_crop,
                         remove_blue_background, detect_specular_reflections)
 
-
 # ------------------------------------------------------------------ #
 #  Step 0 — Morphological close to connect nearby edges              #
 # ------------------------------------------------------------------ #
@@ -34,13 +33,15 @@ def _connect_edges(tray_no_bg, cfg):
 #  Step 1 — Otsu binarization                                        #
 # ------------------------------------------------------------------ #
 
-def _binarize_tray(tray_no_bg):
-    """Grayscale + Otsu threshold on the background-removed image.
+def _binarize_tray(tray_no_bg, cfg):
+    """Grayscale + Otsu threshold on the background-removed image, followed by
+    a morphological close to fill small holes in the binary mask.
     Both the outer tray border and the blue background are already zeroed,
     so Otsu separates instrument pixels from the black canvas cleanly."""
     gray = cv.cvtColor(tray_no_bg, cv.COLOR_RGB2GRAY)
     _, binary = cv.threshold(gray, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU)
-    return binary
+    kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.seg_close_kernel_dims)
+    return cv.morphologyEx(binary, cv.MORPH_CLOSE, kernel)
 
 
 # ------------------------------------------------------------------ #
@@ -265,68 +266,64 @@ def _compute_bbox_stats(binary, bbox):
 
 
 def _analyze_bbox_outliers(binary, bboxes,
-                           aspect_ratio_threshold=2.0,
-                           area_ratio_threshold=2.5):
-    """Classify bboxes into normal and outlier groups using a two-criterion AND gate.
+                           grade_threshold=1.5,
+                           area_weight=0.7,
+                           fill_weight=0.3):
+    """Classify bboxes into normal and outlier groups using a weighted anomaly grade.
 
-    A bbox is flagged as an outlier only when BOTH conditions hold:
-      1. aspect_ratio (min(w,h) / max(w,h)) > aspect_ratio_threshold  × median aspect ratio
-      2. bbox_area    (w × h)               > area_ratio_threshold     × median bbox area
+    Each bbox receives a grade:
+        grade = area_weight  * (bbox_area  / median_bbox_area)
+              + fill_weight  * ((1/fill_ratio) / median_inv_fill_ratio)
 
-    aspect_ratio (short/long, always in [0, 1]) is scale-invariant: it measures
-    shape bloat regardless of image resolution or absolute instrument size. A
-    fused pair of instruments is wider relative to its length than any single
-    tool, so its aspect ratio rises above the median even when the image is
-    downscaled.
+    Both components are normalised by their median so the weights reflect true
+    relative importance rather than raw scale. A large grade means the bbox is
+    both bigger than typical AND has a sparse contour (lots of empty space inside
+    its box), which is the signature of two instruments lying within one detection.
 
-    bbox_area acts as an absolute size guard: compact tools such as scissors
-    naturally have a higher aspect ratio (they are less elongated) but their
-    bbox_area stays near the median. The area criterion prevents those from
-    being falsely flagged — they fail criterion 2 even when they pass criterion 1.
-
-    The AND gate separates the two cases cleanly:
-      - Fused instruments : both criteria fire   → flagged as outlier
-      - Compact tool      : high aspect_ratio but normal bbox_area → NOT flagged
-      - Large slender tool: large bbox_area but low aspect_ratio   → NOT flagged
+    A bbox is flagged when  grade > grade_threshold × median_grade.
 
     Scenarios
     ---------
-    'none'     – no bbox passes both criteria; no fused instruments detected.
+    'none'     – no bbox exceeds the grade cutoff.
     'single'   – exactly one outlier; likely two touching instruments fused.
     'multiple' – two or more outliers; multiple fused or unusually large regions.
 
     Returns
     -------
     dict with keys:
-      'scenario'           : 'none' | 'single' | 'multiple'
-      'outliers'           : list of {'bbox': ..., **stats}
-      'normal'             : list of {'bbox': ..., **stats}
-      'median_bbox_area'   : float  – median bbox area (w×h) across all bboxes
-      'median_aspect_ratio': float  – median aspect ratio across all bboxes (debug)
+      'scenario'    : 'none' | 'single' | 'multiple'
+      'outliers'    : list of {'bbox': ..., 'grade': float, **stats}
+      'normal'      : list of {'bbox': ..., 'grade': float, **stats}
+      'median_grade': float – median grade across all bboxes
+      'grade_cutoff': float – grade_threshold × median_grade
     """
     if not bboxes:
         return {
             'scenario': 'none', 'outliers': [], 'normal': [],
-            'median_bbox_area': 0.0, 'median_aspect_ratio': 0.0,
+            'median_grade': 0.0, 'grade_cutoff': 0.0,
         }
 
-    bbox_areas    = [b[1][0] * b[1][1] for b in bboxes]
-    aspect_ratios = [min(b[1][0], b[1][1]) / max(b[1][0], b[1][1])
-                     if max(b[1][0], b[1][1]) > 0 else 0.0
-                     for b in bboxes]
+    bbox_areas = [b[1][0] * b[1][1] for b in bboxes]
+    inv_fills  = [(b[1][0] * b[1][1]) / b[3] if b[3] > 0 else 0.0
+                  for b in bboxes]
 
-    median_bbox_area   = float(np.median(bbox_areas))
-    median_aspect_ratio = float(np.median(aspect_ratios))
+    median_bbox_area  = float(np.median(bbox_areas))
+    median_inv_fill   = float(np.median(inv_fills))
 
-    area_cutoff   = area_ratio_threshold   * median_bbox_area
-    aspect_cutoff = aspect_ratio_threshold * median_aspect_ratio
+    grades = [
+        area_weight * (ba / median_bbox_area  if median_bbox_area  > 0 else 0.0)
+        + fill_weight * (ivf / median_inv_fill if median_inv_fill > 0 else 0.0)
+        for ba, ivf in zip(bbox_areas, inv_fills)
+    ]
+
+    median_grade = float(np.median(grades))
+    grade_cutoff = grade_threshold * median_grade
 
     outliers, normal = [], []
-    for bbox, ba, ar in zip(bboxes, bbox_areas, aspect_ratios):
+    for bbox, grade in zip(bboxes, grades):
         stats = _compute_bbox_stats(binary, bbox)
-        entry = {'bbox': bbox, **stats}
-        # Both criteria must be exceeded to avoid flagging a single large tool
-        if ar > aspect_cutoff and ba > area_cutoff:
+        entry = {'bbox': bbox, 'grade': grade, **stats}
+        if grade > grade_cutoff:
             outliers.append(entry)
         else:
             normal.append(entry)
@@ -336,11 +333,11 @@ def _analyze_bbox_outliers(binary, bboxes,
     else:                    scenario = 'multiple'
 
     return {
-        'scenario':            scenario,
-        'outliers':            outliers,
-        'normal':              normal,
-        'median_bbox_area':    median_bbox_area,
-        'median_aspect_ratio': median_aspect_ratio,
+        'scenario':     scenario,
+        'outliers':     outliers,
+        'normal':       normal,
+        'median_grade': median_grade,
+        'grade_cutoff': grade_cutoff,
     }
 
 
@@ -361,13 +358,12 @@ def segment_instruments(tray_no_bg, cfg):
         bboxes:     list of (x, y, w, h, area), sorted largest-first.
     """
     tray_closed      = _connect_edges(tray_no_bg, cfg)
-    seg_binary       = _binarize_tray(tray_closed)
+    seg_binary       = _binarize_tray(tray_closed, cfg)
     bboxes           = _find_bboxes(seg_binary, cfg.seg_min_contour_area)
     bboxes, filter_stats = _filter_by_median_area(bboxes, seg_binary, cfg.seg_median_area_threshold)
     outlier_analysis     = _analyze_bbox_outliers(
         seg_binary, bboxes,
-        cfg.seg_outlier_aspect_ratio,
-        cfg.seg_outlier_area_ratio,
+        cfg.seg_outlier_grade_threshold,
     )
     return seg_binary, bboxes, outlier_analysis, filter_stats
 
@@ -441,37 +437,54 @@ def visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes,
     for ax in list(axs.flat)[n_plots:-1]:
         ax.axis("off")
 
-    # Bottom-right panel: filter stats text (always the last grid cell)
+    # Bottom-right panel: per-bbox stats table
     text_ax = axs.flat[-1]
     text_ax.set_xticks([])
     text_ax.set_yticks([])
     for spine in text_ax.spines.values():
         spine.set_visible(False)
-    if filter_stats:
-        text_ax.set_facecolor("#f0f0f0")
-        text_ax.set_title("Median filter stats", fontsize=9)
-        lines = [
-            f"Median : {filter_stats['median']:>12,.1f} px²",
-            f"Thresh : {filter_stats['threshold']:>12.2f} ×",
-            f"Cutoff : {filter_stats['cutoff']:>12,.1f} px²",
-            "",
-            "  #    metric value",
-            "  " + "─" * 22,
-        ]
-        per = filter_stats.get('per_bbox', {})
-        for i, bbox in enumerate(bboxes):
-            val = per.get(id(bbox))
-            val_str = f"{val:>12,.1f} px²" if val is not None else "            n/a"
-            lines.append(f"  #{i + 1:<3}  {val_str}")
-        text_ax.text(
-            0.05, 0.95, "\n".join(lines),
-            transform=text_ax.transAxes,
-            ha='left', va='top',
-            fontsize=8, family='monospace',
-            color='black',
-        )
-    else:
-        text_ax.set_facecolor("#f0f0f0")
+    text_ax.set_facecolor("#f0f0f0")
+    text_ax.set_title("BBox stats", fontsize=9)
+
+    # Build id → (entry, label) lookup from outlier_analysis
+    bbox_info = {}
+    if outlier_analysis:
+        for entry in outlier_analysis.get('outliers', []):
+            bbox_info[id(entry['bbox'])] = (entry, 'outlier')
+        for entry in outlier_analysis.get('normal', []):
+            bbox_info[id(entry['bbox'])] = (entry, 'normal')
+
+    header = f"  {'#':>6}  {'area_px2':>10}  {'fill%':>6}  {'grade':>6}  label"
+    sep    = "  " + "─" * (len(header) - 2)
+    lines  = [header, sep]
+
+    if outlier_analysis:
+        grade_thr = outlier_analysis.get('grade_cutoff', 0.0)
+        lines.append(f"  {'thresh':>6}  {'':>10}  {'':>6}  {'>' + f'{grade_thr:.2f}':>6}  —")
+        lines.append(sep)
+
+    for i, bbox in enumerate(bboxes):
+        bid = id(bbox)
+        if bid in bbox_info:
+            entry, label = bbox_info[bid]
+            area  = entry['bbox_area']
+            fill  = entry['fill_ratio'] * 100.0
+            grade = entry.get('grade', float('nan'))
+        else:
+            _, size, _, contour_area = bbox
+            w, h  = size
+            area  = float(w * h)
+            fill  = contour_area / area * 100.0 if area > 0 else 0.0
+            grade = float('nan')
+            label = '?'
+        lines.append(f"  #{i + 1:<5}  {area:>10,.0f}  {fill:>6.1f}  {grade:>6.2f}  {label}")
+    text_ax.text(
+        0.05, 0.95, "\n".join(lines),
+        transform=text_ax.transAxes,
+        ha='left', va='top',
+        fontsize=8, family='monospace',
+        color='black',
+    )
 
     plt.tight_layout(rect=[0, 0, 1, 0.96])
 
@@ -555,5 +568,5 @@ def main(debugging=False, image_path=None):
 
 
 if __name__ == "__main__":
-    IMAGE_PATH = "./Trays/IMG_3376.jpg" # "./Trays"   # set to a path string to load a specific image, e.g. 
+    IMAGE_PATH = None#"./Trays/IMG_3376.jpg" # "./Trays"   # set to a path string to load a specific image, e.g. 
     main(debugging=True, image_path=IMAGE_PATH)
