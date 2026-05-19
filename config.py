@@ -59,6 +59,9 @@ class PreprocessConfig:
 
     # -- Segmentation (segment_instruments) --
     seg_close_kernel_dims: tuple[int, int] = (16, 16)
+    sauvola_window_size: int = 51
+    sauvola_k: float = 0.2
     seg_min_contour_area: int = 500
     seg_median_area_threshold: float = 0.2
-    seg_outlier_grade_threshold: float = 1.5  # grade > 1.5× median grade ⇒ outlier (grade = 0.7*norm_area + 0.3*norm_inv_fill)
+    seg_outlier_grade_threshold: float = 1.8  # grade > XX × median grade ⇒ outlier candidate
+    seg_outlier_secondary_ratio: float = 1.5  # among candidates, drop any with grade < max_candidate_grade / 1.5

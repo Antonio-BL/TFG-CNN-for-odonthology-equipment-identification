@@ -19,7 +19,7 @@ def main():
     tray_no_bg                = remove_blue_background(tray_masked, cfg)
 
     # -- Segmentation  --
-    seg_binary, bboxes, outlier_analysis = segment_instruments(tray_no_bg, cfg)
+    seg_binary, bboxes, outlier_analysis, _ = segment_instruments(tray_no_bg, cfg)
 
 if __name__ == "__main__":
     main()

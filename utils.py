@@ -113,11 +113,8 @@ def edge_Laplace(image: np.array ) -> np.ndarray:
     Returns: 
         edges_image: image containing the edges.
     '''
-    # Laplacian matrix
     L = 0.25 * np.array([[0, -1, 0],[-1, 4, -1], [0, -1, 0]])
-    print(f"shape L: {L.shape}")
-    print(f"image shape: {image.shape}")
-    edges_image =  convolve2d(image, L, mode="same", boundary="symm")
+    edges_image = convolve2d(image, L, mode="same", boundary="symm")
 
     return edges_image
 

@@ -1,6 +1,6 @@
 # segmentation.py
 # Segments surgical instruments from the background-removed tray image.
-# Pipeline: binarize (Otsu) -> contour detection -> bounding boxes -> visualise
+# Pipeline: binarize (Sauvola) -> contour detection -> bounding boxes -> visualise
 
 import io
 import os
@@ -14,9 +14,12 @@ if platform.system() == "Linux":
     os.environ["QT_QPA_PLATFORM"] = "xcb" # Force x11 on wayland DEs
     os.environ["DISPLAY"] = os.environ.get("DISPLAY", ":0")
 
+from skimage.filters import threshold_sauvola
+
 from config     import PreprocessConfig
 from preprocess import (get_ROI_from_color, binarize_image, get_tray_crop,
                         remove_blue_background, detect_specular_reflections)
+from utils      import edge_Laplace
 
 # ------------------------------------------------------------------ #
 #  Step 0 — Morphological close to connect nearby edges              #
@@ -30,16 +33,17 @@ def _connect_edges(tray_no_bg, cfg):
 
 
 # ------------------------------------------------------------------ #
-#  Step 1 — Otsu binarization                                        #
+#  Step 1 — Sauvola binarization                                     #
 # ------------------------------------------------------------------ #
 
 def _binarize_tray(tray_no_bg, cfg):
-    """Grayscale + Otsu threshold on the background-removed image, followed by
+    """Sauvola local threshold on the background-removed image, followed by
     a morphological close to fill small holes in the binary mask.
-    Both the outer tray border and the blue background are already zeroed,
-    so Otsu separates instrument pixels from the black canvas cleanly."""
-    gray = cv.cvtColor(tray_no_bg, cv.COLOR_RGB2GRAY)
-    _, binary = cv.threshold(gray, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU)
+    Sauvola adapts the threshold per-pixel based on local mean and std,
+    preserving fine instrument detail better than a global Otsu threshold."""
+    gray   = cv.cvtColor(tray_no_bg, cv.COLOR_RGB2GRAY)
+    thresh = threshold_sauvola(gray, window_size=cfg.sauvola_window_size, k=cfg.sauvola_k)
+    binary = (gray > thresh).astype(np.uint8) * 255
     kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.seg_close_kernel_dims)
     return cv.morphologyEx(binary, cv.MORPH_CLOSE, kernel)
 
@@ -160,15 +164,12 @@ def _apply_knn_clustering(binary, distance_threshold=50, size_ratio_threshold=0.
 # ------------------------------------------------------------------ #
 
 def _find_bboxes(binary, min_area):
-    """Return a list of oriented bounding boxes for each external contour
-    whose area exceeds min_area.
+    """Return a list of minimum-area oriented bounding boxes for each external
+    contour whose area exceeds min_area.
 
     Returns:
-        list of (center, size, angle, area) where:
-        - center: (x, y) tuple
-        - size: (width, height) tuple
-        - angle: rotation angle in degrees
-        - area: contour area in pixels
+        list of (center, size, angle, contour_area) where center=(cx,cy),
+        size=(w,h), angle is the rotation in degrees.
     """
     contours, _ = cv.findContours(binary, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
     bboxes = []
@@ -176,9 +177,7 @@ def _find_bboxes(binary, min_area):
         area = cv.contourArea(cnt)
         if area < min_area:
             continue
-        # Use minAreaRect for oriented bounding box
-        rect = cv.minAreaRect(cnt)
-        center, size, angle = rect
+        center, size, angle = cv.minAreaRect(cnt)
         bboxes.append((center, size, angle, int(area)))
     # Largest first
     bboxes.sort(key=lambda b: b[3], reverse=True)
@@ -198,7 +197,7 @@ def _filter_by_median_area(bboxes, binary, threshold):
     polygon area but a large oriented-bbox footprint, and we want to keep it.
 
     Args:
-        bboxes:    list of (center, size, angle, area).
+        bboxes:    list of (center, size, angle, contour_area).
         binary:    uint8 binary mask used to count positive pixels per bbox.
         threshold: fraction of the median metric used as the lower bound.
 
@@ -248,8 +247,7 @@ def _compute_bbox_stats(binary, bbox):
     w, h = size
     bbox_area = float(w * h)
 
-    box_pts = cv.boxPoints(((center[0], center[1]), size, angle))
-    box_pts = np.int32(box_pts)
+    box_pts  = np.int32(cv.boxPoints(((center[0], center[1]), size, angle)))
     roi_mask = np.zeros(binary.shape[:2], dtype=np.uint8)
     cv.fillPoly(roi_mask, [box_pts], 255)
     positive_pixels = int(np.count_nonzero(cv.bitwise_and(binary, roi_mask)))
@@ -265,79 +263,135 @@ def _compute_bbox_stats(binary, bbox):
     }
 
 
-def _analyze_bbox_outliers(binary, bboxes,
-                           grade_threshold=1.5,
-                           area_weight=0.7,
-                           fill_weight=0.3):
-    """Classify bboxes into normal and outlier groups using a weighted anomaly grade.
+def _edge_length_in_bbox(edge_binary, bbox):
+    """Count edge pixels inside an oriented bounding box."""
+    img_h, img_w = edge_binary.shape
+    center, size, angle = bbox[0], bbox[1], bbox[2]
+    mask    = np.zeros((img_h, img_w), dtype=np.uint8)
+    box_pts = np.int32(cv.boxPoints((center, size, angle)))
+    cv.fillPoly(mask, [box_pts], 255)
+    return int(np.count_nonzero(edge_binary[mask > 0]))
 
-    Each bbox receives a grade:
-        grade = area_weight  * (bbox_area  / median_bbox_area)
-              + fill_weight  * ((1/fill_ratio) / median_inv_fill_ratio)
 
-    Both components are normalised by their median so the weights reflect true
-    relative importance rather than raw scale. A large grade means the bbox is
-    both bigger than typical AND has a sparse contour (lots of empty space inside
-    its box), which is the signature of two instruments lying within one detection.
+def _analyze_bbox_outliers(binary, bboxes, component_threshold=1.5,
+                           secondary_ratio=1.5):
+    """Classify bboxes into normal and outlier groups using a grade median filter
+    with a secondary consistency check for the multiple-outlier scenario.
 
-    A bbox is flagged when  grade > grade_threshold × median_grade.
+    Each component is scaled by the minimum value seen across all bboxes (→ [1, ∞)):
+
+        area_score = bbox_area        / min_bbox_area
+        edge_score = edge_length      / min_edge_length
+        fill_score = (1/fill_ratio)   / min_inv_fill_ratio
+
+    Primary pass: flag any bbox whose grade exceeds component_threshold × median_grade,
+    where grade = 0.50·area_score + 0.25·edge_score + 0.25·fill_score.
+
+    Secondary pass (applied when 2+ candidates survive the primary pass):
+    among the flagged candidates keep only those whose grade is within
+    secondary_ratio of the maximum candidate grade:
+
+        keep if  grade ≥ max_candidate_grade / secondary_ratio
+
+    This ensures "multiple" only fires when the outlier grades are genuinely
+    close to each other. A candidate that is far below the true peak (e.g.
+    grade 4.93 vs peak 11.71 with ratio 2.0 → cutoff 5.86) is reclassified
+    as normal, collapsing the scenario back to 'single'.
 
     Scenarios
     ---------
     'none'     – no bbox exceeds the grade cutoff.
-    'single'   – exactly one outlier; likely two touching instruments fused.
-    'multiple' – two or more outliers; multiple fused or unusually large regions.
+    'single'   – exactly one bbox survives both passes; likely two touching instruments fused.
+    'multiple' – two or more bboxes survive both passes, with similar grades.
 
     Returns
     -------
     dict with keys:
-      'scenario'    : 'none' | 'single' | 'multiple'
-      'outliers'    : list of {'bbox': ..., 'grade': float, **stats}
-      'normal'      : list of {'bbox': ..., 'grade': float, **stats}
-      'median_grade': float – median grade across all bboxes
-      'grade_cutoff': float – grade_threshold × median_grade
+      'scenario'          : 'none' | 'single' | 'multiple'
+      'outliers'          : list of {'bbox': ..., 'area_score', 'edge_score', 'fill_score', 'grade', **stats}
+      'normal'            : same structure
+      'median_area_score' : float
+      'median_edge_score' : float
+      'median_fill_score' : float
+      'median_grade'      : float
+      'grade_cutoff'      : float – component_threshold × median_grade
     """
     if not bboxes:
         return {
             'scenario': 'none', 'outliers': [], 'normal': [],
-            'median_grade': 0.0, 'grade_cutoff': 0.0,
+            'median_area_score': 0.0, 'median_edge_score': 0.0,
+            'median_fill_score': 0.0, 'median_grade': 0.0,
+            'grade_cutoff': 0.0,
+            'primary_candidates': [], 'max_candidate_grade': 0.0,
+            'secondary_cutoff': 0.0, 'secondary_ratio': secondary_ratio,
         }
 
-    bbox_areas = [b[1][0] * b[1][1] for b in bboxes]
-    inv_fills  = [(b[1][0] * b[1][1]) / b[3] if b[3] > 0 else 0.0
-                  for b in bboxes]
+    edge_img    = edge_Laplace(binary.astype(np.float32))
+    edge_binary = (np.abs(edge_img) > 1.0).astype(np.uint8) * 255
 
-    median_bbox_area  = float(np.median(bbox_areas))
-    median_inv_fill   = float(np.median(inv_fills))
+    bbox_areas   = [b[1][0] * b[1][1] for b in bboxes]
+    edge_lengths = [_edge_length_in_bbox(edge_binary, b) for b in bboxes]
+    inv_fills    = [(b[1][0] * b[1][1]) / b[3] if b[3] > 0 else 0.0
+                    for b in bboxes]
 
-    grades = [
-        area_weight * (ba / median_bbox_area  if median_bbox_area  > 0 else 0.0)
-        + fill_weight * (ivf / median_inv_fill if median_inv_fill > 0 else 0.0)
-        for ba, ivf in zip(bbox_areas, inv_fills)
-    ]
+    min_bbox_area = max(float(np.min(bbox_areas)),  1.0)
+    min_edge_len  = max(float(np.min(edge_lengths)), 1.0)
+    min_inv_fill  = max(float(np.min(inv_fills)),    1e-6)
 
-    median_grade = float(np.median(grades))
-    grade_cutoff = grade_threshold * median_grade
+    area_scores = [ba  / min_bbox_area for ba  in bbox_areas]
+    edge_scores = [el  / min_edge_len  for el  in edge_lengths]
+    fill_scores = [ivf / min_inv_fill  for ivf in inv_fills]
+    grades      = [0.50 * a + 0.25 * e + 0.25 * f
+                   for a, e, f in zip(area_scores, edge_scores, fill_scores)]
+
+    median_area_score = float(np.median(area_scores))
+    median_edge_score = float(np.median(edge_scores))
+    median_fill_score = float(np.median(fill_scores))
+    median_grade      = float(np.median(grades))
+
+    grade_cutoff = component_threshold * median_grade
 
     outliers, normal = [], []
-    for bbox, grade in zip(bboxes, grades):
+    for bbox, a_sc, e_sc, f_sc, grade in zip(
+            bboxes, area_scores, edge_scores, fill_scores, grades):
         stats = _compute_bbox_stats(binary, bbox)
-        entry = {'bbox': bbox, 'grade': grade, **stats}
+        entry = {'bbox': bbox,
+                 'area_score': a_sc, 'edge_score': e_sc, 'fill_score': f_sc,
+                 'grade': grade, **stats}
         if grade > grade_cutoff:
             outliers.append(entry)
         else:
             normal.append(entry)
+
+    # Snapshot primary candidates before secondary pass
+    primary_candidates   = list(outliers)
+    max_candidate_grade  = max((e['grade'] for e in outliers), default=0.0)
+    secondary_cutoff_val = 0.0
+
+    # Secondary pass: among candidates, drop those far below the peak grade
+    if len(outliers) >= 2:
+        secondary_cutoff_val = max_candidate_grade / secondary_ratio
+        true_outliers = [e for e in outliers if e['grade'] >= secondary_cutoff_val]
+        normal       += [e for e in outliers if e['grade'] <  secondary_cutoff_val]
+        outliers      = true_outliers
 
     if   len(outliers) == 0: scenario = 'none'
     elif len(outliers) == 1: scenario = 'single'
     else:                    scenario = 'multiple'
 
     return {
-        'scenario':     scenario,
-        'outliers':     outliers,
-        'normal':       normal,
-        'median_grade': median_grade,
-        'grade_cutoff': grade_cutoff,
+        'scenario':            scenario,
+        'outliers':            outliers,
+        'normal':              normal,
+        'median_area_score':   median_area_score,
+        'median_edge_score':   median_edge_score,
+        'median_fill_score':   median_fill_score,
+        'median_grade':        median_grade,
+        'grade_cutoff':        grade_cutoff,
+        'primary_candidates':  primary_candidates,
+        'max_candidate_grade': max_candidate_grade,
+        'secondary_cutoff':    secondary_cutoff_val,
+        'secondary_ratio':     secondary_ratio,
     }
 
 
@@ -364,6 +418,7 @@ def segment_instruments(tray_no_bg, cfg):
     outlier_analysis     = _analyze_bbox_outliers(
         seg_binary, bboxes,
         cfg.seg_outlier_grade_threshold,
+        cfg.seg_outlier_secondary_ratio,
     )
     return seg_binary, bboxes, outlier_analysis, filter_stats
 
@@ -375,13 +430,18 @@ def segment_instruments(tray_no_bg, cfg):
 def visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes,
                       reflection_mask=None, image_label=None, outlier_analysis=None,
                       filter_stats=None):
-    """Plot: original tray | reflections | background-removed | Otsu binary | bounding boxes."""
+    """Plot: original tray | reflections (opt) | bg-removed | Sauvola binary | edges+bboxes."""
     n_plots = 5 if reflection_mask is not None else 4
     ncols = 3
     nrows = -(-n_plots // ncols)  # ceiling division
     fig, axs = plt.subplots(nrows, ncols, figsize=(18, 6 * nrows))
     if image_label:
         fig.suptitle(image_label, fontsize=13, fontweight="bold")
+
+    outlier_bboxes = set()
+    if outlier_analysis and outlier_analysis['outliers']:
+        outlier_bboxes = {id(e['bbox']) for e in outlier_analysis['outliers']}
+
     axs.flat[0].imshow(tray_masked)
     axs.flat[0].set_title("Original tray masked")
     axs.flat[0].axis("off")
@@ -399,30 +459,36 @@ def visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes,
     idx += 1
 
     axs.flat[idx].imshow(seg_binary, cmap="gray")
-    axs.flat[idx].set_title("Otsu binary mask")
+    axs.flat[idx].set_title("Sauvola binary mask")
     axs.flat[idx].axis("off")
     idx += 1
 
-    bbox_ax = axs.flat[idx]
-    bbox_ax.imshow(tray_no_bg)
-    bbox_ax.set_title(f"Bounding boxes ({len(bboxes)} instruments)")
-    bbox_ax.axis("off")
+    # Combined panel: Laplacian edges on binary + oriented bbox rectangles + labels
+    edge_img    = edge_Laplace(seg_binary.astype(np.float32))
+    edge_binary = np.abs(edge_img) > 1.0
+    overlay  = cv.cvtColor(seg_binary, cv.COLOR_GRAY2RGB)
+    h_img, w_img = seg_binary.shape
+    for bbox in bboxes:
+        center, size, angle = bbox[0], bbox[1], bbox[2]
+        bbox_mask = np.zeros((h_img, w_img), dtype=np.uint8)
+        cv.fillPoly(bbox_mask, [np.int32(cv.boxPoints((center, size, angle)))], 255)
+        colour_rgb = (255, 0, 0) if id(bbox) in outlier_bboxes else (0, 255, 0)
+        overlay[edge_binary & (bbox_mask > 0)] = colour_rgb
 
-    outlier_bboxes = set()
-    if outlier_analysis and outlier_analysis['outliers']:
-        outlier_bboxes = {id(e['bbox']) for e in outlier_analysis['outliers']}
+    bbox_ax = axs.flat[idx]
+    bbox_ax.imshow(overlay)
+    bbox_ax.set_title(f"Laplacian edges + bboxes ({len(bboxes)} instruments)")
+    bbox_ax.axis("off")
 
     for i, bbox in enumerate(bboxes):
         center, size, angle, area = bbox
         is_outlier = id(bbox) in outlier_bboxes
         colour = "red" if is_outlier else "lime"
-        box_points = cv.boxPoints(((center[0], center[1]), size, angle))
-        box_points = np.int32(box_points)
-        polygon = mpatches.Polygon(
+        box_points = np.int32(cv.boxPoints(((center[0], center[1]), size, angle)))
+        bbox_ax.add_patch(mpatches.Polygon(
             box_points, closed=True,
             linewidth=2, edgecolor=colour, facecolor="none"
-        )
-        bbox_ax.add_patch(polygon)
+        ))
         w, h = size
         label = f"#{i+1}  {w:.0f}x{h:.0f}  {angle:.1f}°  ({area:,} px)"
         if is_outlier:
@@ -454,30 +520,59 @@ def visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes,
         for entry in outlier_analysis.get('normal', []):
             bbox_info[id(entry['bbox'])] = (entry, 'normal')
 
-    header = f"  {'#':>6}  {'area_px2':>10}  {'fill%':>6}  {'grade':>6}  label"
+    nan = float('nan')
+    header = f"  {'#':>6}  {'area_sc':>7}  {'edge_sc':>7}  {'fill_sc':>7}  {'grade':>6}  label"
     sep    = "  " + "─" * (len(header) - 2)
     lines  = [header, sep]
 
     if outlier_analysis:
-        grade_thr = outlier_analysis.get('grade_cutoff', 0.0)
-        lines.append(f"  {'thresh':>6}  {'':>10}  {'':>6}  {'>' + f'{grade_thr:.2f}':>6}  —")
+        med_a = outlier_analysis.get('median_area_score', nan)
+        med_e = outlier_analysis.get('median_edge_score', nan)
+        med_f = outlier_analysis.get('median_fill_score', nan)
+        med_g = outlier_analysis.get('median_grade',      nan)
+        thr_g = outlier_analysis.get('grade_cutoff',       nan)
+        lines.append(f"  {'median':>6}  {med_a:>7.2f}  {med_e:>7.2f}  {med_f:>7.2f}  {med_g:>6.2f}  —")
+        lines.append(f"  {'thresh':>6}  {'':>7}  {'':>7}  {'':>7}  {'>' + f'{thr_g:.2f}':>6}  —")
         lines.append(sep)
 
     for i, bbox in enumerate(bboxes):
         bid = id(bbox)
         if bid in bbox_info:
             entry, label = bbox_info[bid]
-            area  = entry['bbox_area']
-            fill  = entry['fill_ratio'] * 100.0
-            grade = entry.get('grade', float('nan'))
+            a_sc  = entry.get('area_score', nan)
+            e_sc  = entry.get('edge_score', nan)
+            f_sc  = entry.get('fill_score', nan)
+            grade = entry.get('grade',      nan)
         else:
-            _, size, _, contour_area = bbox
-            w, h  = size
-            area  = float(w * h)
-            fill  = contour_area / area * 100.0 if area > 0 else 0.0
-            grade = float('nan')
+            a_sc = e_sc = f_sc = grade = nan
             label = '?'
-        lines.append(f"  #{i + 1:<5}  {area:>10,.0f}  {fill:>6.1f}  {grade:>6.2f}  {label}")
+        lines.append(f"  #{i + 1:<5}  {a_sc:>7.2f}  {e_sc:>7.2f}  {f_sc:>7.2f}  {grade:>6.2f}  {label}")
+
+    # --- Secondary filter table ---
+    lines.append("")
+    if outlier_analysis:
+        prim      = outlier_analysis.get('primary_candidates', [])
+        sec_cut   = outlier_analysis.get('secondary_cutoff',    0.0)
+        max_cg    = outlier_analysis.get('max_candidate_grade', 0.0)
+        sec_ratio = outlier_analysis.get('secondary_ratio',     nan)
+        outlier_ids = {id(e['bbox']) for e in outlier_analysis.get('outliers', [])}
+        bbox_id_to_idx = {id(b): i for i, b in enumerate(bboxes)}
+
+        triggered = len(prim) >= 2
+        trigger_lbl = "TRIGGERED" if triggered else f"not triggered ({len(prim)} primary candidate(s))"
+        lines.append(f"  Secondary filter — {trigger_lbl}")
+
+        if triggered:
+            lines.append(f"  max_grade: {max_cg:.2f}   cutoff: {sec_cut:.2f}   ratio: {sec_ratio:.1f}")
+            sec_header = f"  {'#':>6}  {'grade':>6}  status"
+            sec_sep    = "  " + "─" * (len(sec_header) - 2)
+            lines += [sec_header, sec_sep]
+            for cand in sorted(prim, key=lambda e: e['grade'], reverse=True):
+                bid   = id(cand['bbox'])
+                idx   = bbox_id_to_idx.get(bid, -1)
+                lbl   = "OUTLIER" if bid in outlier_ids else "demoted"
+                lines.append(f"  #{idx + 1:<5}  {cand['grade']:>6.2f}  {lbl}")
+
     text_ax.text(
         0.05, 0.95, "\n".join(lines),
         transform=text_ax.transAxes,
@@ -518,45 +613,32 @@ def visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes,
 #  Entry point                                                        #
 # ------------------------------------------------------------------ #
 
-def main(debugging=False, image_path=None):
-    cfg = PreprocessConfig()
-
-    if image_path is None:
-        all_paths = [
-            os.path.join(wd, f)
-            for wd, _, files in os.walk("./Trays")
-            for f in files
-        ]
-        if not all_paths:
-            raise FileNotFoundError("No images found in ./Trays")
-        image_path = all_paths[np.random.randint(0, len(all_paths))]
-
+def _process_image(image_path, cfg, debugging=False):
+    """Run the full pipeline on a single image. Returns the standard 5-tuple."""
     img_bgr = cv.imread(image_path)
     if img_bgr is None:
         raise FileNotFoundError(f"Could not load image: {image_path}")
     img_rgb = cv.cvtColor(img_bgr, cv.COLOR_BGR2RGB)
     img_rgb = cv.resize(img_rgb, cfg.image_dims, interpolation=cv.INTER_AREA)
     image_label = os.path.basename(image_path)
-    print(f"[debug] Loaded image: {image_path}")
+    print(f"\n[debug] {image_path}")
 
-    # Preprocessing pipeline
     roi_crop, roi_mask, roi_bbox         = get_ROI_from_color(img_rgb, cfg)
     binary_mask                          = binarize_image(roi_crop, cfg)
     tray_masked, tray_mask, _            = get_tray_crop(roi_crop, binary_mask, cfg)
     reflection_mask                      = detect_specular_reflections(tray_masked, cfg)
     tray_no_bg                           = remove_blue_background(tray_masked, cfg)
 
-    # Segmentation
     seg_binary, bboxes, outlier_analysis, filter_stats = segment_instruments(tray_no_bg, cfg)
 
-    print(f"Found {len(bboxes)} instrument(s)  [outlier scenario: {outlier_analysis['scenario']}]")
+    print(f"  {len(bboxes)} instrument(s)  [scenario: {outlier_analysis['scenario']}]")
     outlier_bboxes = {id(e['bbox']) for e in outlier_analysis['outliers']}
     for i, bbox in enumerate(bboxes):
         center, size, angle, area = bbox
         cx, cy = center
         w, h = size
         flag = "  ⚠ OUTLIER" if id(bbox) in outlier_bboxes else ""
-        print(f"  #{i+1}  center=({cx:.1f}, {cy:.1f})  size={w:.1f}x{h:.1f}  angle={angle:.1f}°  area={area:,} px{flag}")
+        print(f"    #{i+1}  center=({cx:.1f},{cy:.1f})  size={w:.1f}x{h:.1f}  angle={angle:.1f}°  area={area:,} px{flag}")
 
     if debugging:
         visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes,
@@ -567,6 +649,43 @@ def main(debugging=False, image_path=None):
     return tray_no_bg, seg_binary, bboxes, outlier_analysis, filter_stats
 
 
+def main(debugging=False, image_path=None):
+    """Run segmentation on one image (random if image_path is None) or all images
+    in ./Trays when image_path is the string 'all'."""
+    cfg = PreprocessConfig()
+
+    if image_path == 'all':
+        all_paths = sorted(
+            os.path.join(wd, f)
+            for wd, _, files in os.walk("./Trays")
+            for f in files
+            if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))
+        )
+        if not all_paths:
+            raise FileNotFoundError("No images found in ./Trays")
+        print(f"Processing {len(all_paths)} image(s)…")
+        results = []
+        for path in all_paths:
+            try:
+                results.append(_process_image(path, cfg, debugging=debugging))
+            except Exception as e:
+                print(f"  [error] {path}: {e}")
+        return results
+
+    if image_path is None:
+        all_paths = [
+            os.path.join(wd, f)
+            for wd, _, files in os.walk("./Trays")
+            for f in files
+            if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))
+        ]
+        if not all_paths:
+            raise FileNotFoundError("No images found in ./Trays")
+        image_path = all_paths[np.random.randint(0, len(all_paths))]
+
+    return _process_image(image_path, cfg, debugging=debugging)
+
+
 if __name__ == "__main__":
-    IMAGE_PATH = None#"./Trays/IMG_3376.jpg" # "./Trays"   # set to a path string to load a specific image, e.g. 
+    IMAGE_PATH ='all' #"./Trays/IMG_3347.jpg"#'all'  # None = random, 'all' = every image in ./Trays, or a specific path
     main(debugging=True, image_path=IMAGE_PATH)
