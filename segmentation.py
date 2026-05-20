@@ -40,124 +40,16 @@ def _binarize_tray(tray_no_bg, cfg):
     """Sauvola local threshold on the background-removed image, followed by
     a morphological close to fill small holes in the binary mask.
     Sauvola adapts the threshold per-pixel based on local mean and std,
-    preserving fine instrument detail better than a global Otsu threshold."""
+    preserving fine instrument detail better than a global Otsu threshold. Dilation afterwards."""
     gray   = cv.cvtColor(tray_no_bg, cv.COLOR_RGB2GRAY)
     thresh = threshold_sauvola(gray, window_size=cfg.sauvola_window_size, k=cfg.sauvola_k)
     binary = (gray > thresh).astype(np.uint8) * 255
-    kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.seg_close_kernel_dims)
-    return cv.morphologyEx(binary, cv.MORPH_CLOSE, kernel)
-
-
-# ------------------------------------------------------------------ #
-#  Step 2 — KNN clustering of contours                               #
-# ------------------------------------------------------------------ #
-
-def _apply_knn_clustering(binary, distance_threshold=50, size_ratio_threshold=0.5):
-    """
-    NOT APPLIED-- AGGRAVATES OVERLAPPING ERRORS --
-    
-    Gently merge only nearby small contour fragments.
-
-    This approach only merges small contours (below median area) that are
-    very close to each other, avoiding aggressive over-merging. Uses distance-based
-    clustering rather than k-nearest neighbors for finer control.
-
-    Args:
-        binary: Binary mask (H, W) with instrument pixels = 255.
-        distance_threshold: Maximum distance between centroids to consider merging (pixels).
-        size_ratio_threshold: Only merge contours below this ratio of median area.
-
-    Returns:
-        Merged binary mask with gently merged contours.
-    """
-    contours, _ = cv.findContours(binary, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
-
-    if len(contours) <= 1:
-        result = binary.copy()
-        if contours:
-            cv.drawContours(result, contours, -1, 255, thickness=cv.FILLED)
-        return result
-
-    # Compute centroids and areas of each contour
-    centroids = []
-    areas = []
-    valid_indices = []
-
-    for idx, cnt in enumerate(contours):
-        M = cv.moments(cnt)
-        if M["m00"] > 0:
-            cx = int(M["m10"] / M["m00"])
-            cy = int(M["m01"] / M["m00"])
-            area = cv.contourArea(cnt)
-            centroids.append([cx, cy])
-            areas.append(area)
-            valid_indices.append(idx)
-
-    if not centroids:
-        return binary
-
-    centroids = np.array(centroids, dtype=np.float32)
-    areas = np.array(areas)
-    median_area = np.median(areas)
-
-    # Identify small contours (fragments) to consider for merging
-    small_mask = areas < (size_ratio_threshold * median_area)
-
-    # Build distance-based clusters for small contours only
-    clusters = {}
-    visited = set()
-    cluster_id = 0
-
-    for i in range(len(centroids)):
-        if i in visited or not small_mask[i]:
-            # Large contours are never merged, each forms its own cluster
-            clusters[cluster_id] = {i}
-            visited.add(i)
-            cluster_id += 1
-            continue
-
-        cluster = set()
-        queue = [i]
-
-        while queue:
-            curr = queue.pop(0)
-            if curr in visited:
-                continue
-            visited.add(curr)
-            cluster.add(curr)
-
-            # Find nearby contours within distance threshold
-            curr_centroid = centroids[curr]
-            for j in range(len(centroids)):
-                if j in visited or not small_mask[j]:
-                    continue
-
-                # Calculate distance to this contour
-                dist = np.linalg.norm(centroids[j] - curr_centroid)
-
-                if dist <= distance_threshold:
-                    queue.append(j)
-
-        clusters[cluster_id] = cluster
-        cluster_id += 1
-
-    # Draw merged contours from clusters
-    result = np.zeros_like(binary)
-    for cluster_indices in clusters.values():
-        # Merge contours in the cluster
-        merged_contour_points = []
-        for idx in cluster_indices:
-            original_idx = valid_indices[idx]
-            merged_contour_points.extend(contours[original_idx].reshape(-1, 2))
-
-        if merged_contour_points:
-            merged_contour_points = np.array(merged_contour_points, dtype=np.int32)
-            # Draw convex hull of merged points
-            hull = cv.convexHull(merged_contour_points)
-            cv.drawContours(result, [hull], -1, 255, thickness=cv.FILLED)
-
-    return result
-
+    # dilation and closing
+    dilating_kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.seg_close_kernel_dims)
+    dilated_img = cv.morphologyEx(binary, cv.MORPH_DILATE, dilating_kernel)
+    opening_kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.open_kernel_dims)
+    opened_img = cv.morphologyEx(dilated_img, cv.MORPH_OPEN, opening_kernel) 
+    return opened_img
 
 # ------------------------------------------------------------------ #
 #  Step 3 — Contour detection and bounding boxes                     #
@@ -396,6 +288,87 @@ def _analyze_bbox_outliers(binary, bboxes, component_threshold=1.5,
 
 
 # ------------------------------------------------------------------ #
+#  Step 6 — Watershed on outlier bboxes (debug / trial)             #
+# ------------------------------------------------------------------ #
+
+def apply_watershed_to_outliers(seg_binary, outlier_analysis):
+    """Apply watershed localised to each outlier bbox to split fused instruments.
+
+    Uses the distance transform of the binary mask as the flooding height map.
+    Local maxima (instrument centres) become seeds; the contact-line valley
+    becomes the watershed boundary.
+
+    Args:
+        seg_binary:       uint8 binary mask (H, W).
+        outlier_analysis: dict from _analyze_bbox_outliers.
+
+    Returns:
+        RGB uint8 image (H, W, 3) with each recovered segment coloured
+        distinctly and boundaries in red, or None if there are no outliers.
+    """
+    if not outlier_analysis or not outlier_analysis['outliers']:
+        return None
+
+    h_img, w_img = seg_binary.shape
+    result = cv.cvtColor(seg_binary, cv.COLOR_GRAY2RGB)
+
+    seg_colors = [
+        ( 50, 200,  50),
+        ( 50,  50, 220),
+        (220, 200,  50),
+        (220,  50, 220),
+        ( 50, 220, 220),
+    ]
+
+    for entry in outlier_analysis['outliers']:
+        bbox = entry['bbox']
+        center, size, angle = bbox[0], bbox[1], bbox[2]
+        box_pts = np.int32(cv.boxPoints((center, size, angle)))
+
+        full_mask = np.zeros((h_img, w_img), dtype=np.uint8)
+        cv.fillPoly(full_mask, [box_pts], 255)
+
+        ax, ay, aw, ah = cv.boundingRect(box_pts)
+        x1, y1 = max(0, ax),         max(0, ay)
+        x2, y2 = min(w_img, ax + aw), min(h_img, ay + ah)
+        if x2 <= x1 or y2 <= y1:
+            continue
+
+        roi_bin = cv.bitwise_and(seg_binary[y1:y2, x1:x2],
+                                  full_mask[y1:y2, x1:x2])
+
+        dist = cv.distanceTransform(roi_bin, cv.DIST_L2, 5)
+        if dist.max() < 1.0:
+            continue
+
+        _, sure_fg = cv.threshold(dist, 0.5 * dist.max(), 255, cv.THRESH_BINARY)
+        sure_fg = sure_fg.astype(np.uint8)
+
+        kernel  = cv.getStructuringElement(cv.MORPH_ELLIPSE, (5, 5))
+        sure_bg = cv.dilate(roi_bin, kernel, iterations=2)
+        unknown = cv.subtract(sure_bg, sure_fg)
+
+        num_labels, markers = cv.connectedComponents(sure_fg)
+        markers = (markers + 1).astype(np.int32)
+        markers[unknown == 255] = 0
+
+        # Invert distance transform: centres become valleys, contact saddle
+        # becomes the local peak where watershed places the boundary.
+        dist_u8  = cv.normalize(dist, None, 0, 255, cv.NORM_MINMAX).astype(np.uint8)
+        inv_dist = 255 - dist_u8
+        roi_3ch  = cv.merge([inv_dist, inv_dist, inv_dist])
+        cv.watershed(roi_3ch, markers)
+
+        for label in range(2, num_labels + 1):
+            color = seg_colors[(label - 2) % len(seg_colors)]
+            result[y1:y2, x1:x2][markers == label] = color
+
+        result[y1:y2, x1:x2][markers == -1] = (255, 50, 50)
+
+    return result
+
+
+# ------------------------------------------------------------------ #
 #  Public API                                                         #
 # ------------------------------------------------------------------ #
 
@@ -429,12 +402,13 @@ def segment_instruments(tray_no_bg, cfg):
 
 def visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes,
                       reflection_mask=None, image_label=None, outlier_analysis=None,
-                      filter_stats=None):
-    """Plot: original tray | reflections (opt) | bg-removed | Sauvola binary | edges+bboxes."""
-    n_plots = 5 if reflection_mask is not None else 4
-    ncols = 3
-    nrows = -(-n_plots // ncols)  # ceiling division
-    fig, axs = plt.subplots(nrows, ncols, figsize=(18, 6 * nrows))
+                      filter_stats=None, img_rgb=None, roi_bbox=None,
+                      watershed_img=None):
+    """Plot 6-panel grid (2×3):
+      [0] Original image + ROI bbox  [1] Specular reflections  [2] Binary mask
+      [3] Edges + bboxes             [4] Watershed on outliers [5] Stats table
+    """
+    fig, axs = plt.subplots(2, 3, figsize=(18, 12))
     if image_label:
         fig.suptitle(image_label, fontsize=13, fontweight="bold")
 
@@ -442,31 +416,36 @@ def visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes,
     if outlier_analysis and outlier_analysis['outliers']:
         outlier_bboxes = {id(e['bbox']) for e in outlier_analysis['outliers']}
 
-    axs.flat[0].imshow(tray_masked)
-    axs.flat[0].set_title("Original tray masked")
+    # ── Panel 0: original image with ROI bounding box ────────────────
+    if img_rgb is not None and roi_bbox is not None:
+        roi_viz = img_rgb.copy()
+        x0, y0, rw, rh = roi_bbox
+        cv.rectangle(roi_viz, (x0, y0), (x0 + rw, y0 + rh), (0, 255, 0), thickness=4)
+        axs.flat[0].imshow(roi_viz)
+        axs.flat[0].set_title("Original image + ROI")
+    else:
+        axs.flat[0].imshow(tray_masked)
+        axs.flat[0].set_title("Tray masked")
     axs.flat[0].axis("off")
 
-    idx = 1
+    # ── Panel 1: specular reflections ────────────────────────────────
     if reflection_mask is not None:
-        axs.flat[idx].imshow(reflection_mask, cmap="gray")
-        axs.flat[idx].set_title("Specular reflections")
-        axs.flat[idx].axis("off")
-        idx += 1
+        axs.flat[1].imshow(reflection_mask, cmap="gray")
+        axs.flat[1].set_title("Specular reflections removed")
+    else:
+        axs.flat[1].imshow(tray_no_bg)
+        axs.flat[1].set_title("Background removed (H only)")
+    axs.flat[1].axis("off")
 
-    axs.flat[idx].imshow(tray_no_bg)
-    axs.flat[idx].set_title("Background removed (H only)")
-    axs.flat[idx].axis("off")
-    idx += 1
+    # ── Panel 2: Sauvola binary mask ─────────────────────────────────
+    axs.flat[2].imshow(seg_binary, cmap="gray")
+    axs.flat[2].set_title("Sauvola binary mask")
+    axs.flat[2].axis("off")
 
-    axs.flat[idx].imshow(seg_binary, cmap="gray")
-    axs.flat[idx].set_title("Sauvola binary mask")
-    axs.flat[idx].axis("off")
-    idx += 1
-
-    # Combined panel: Laplacian edges on binary + oriented bbox rectangles + labels
+    # ── Panel 3: Laplacian edges + oriented bboxes ───────────────────
     edge_img    = edge_Laplace(seg_binary.astype(np.float32))
     edge_binary = np.abs(edge_img) > 1.0
-    overlay  = cv.cvtColor(seg_binary, cv.COLOR_GRAY2RGB)
+    overlay     = cv.cvtColor(seg_binary, cv.COLOR_GRAY2RGB)
     h_img, w_img = seg_binary.shape
     for bbox in bboxes:
         center, size, angle = bbox[0], bbox[1], bbox[2]
@@ -475,7 +454,7 @@ def visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes,
         colour_rgb = (255, 0, 0) if id(bbox) in outlier_bboxes else (0, 255, 0)
         overlay[edge_binary & (bbox_mask > 0)] = colour_rgb
 
-    bbox_ax = axs.flat[idx]
+    bbox_ax = axs.flat[3]
     bbox_ax.imshow(overlay)
     bbox_ax.set_title(f"Laplacian edges + bboxes ({len(bboxes)} instruments)")
     bbox_ax.axis("off")
@@ -490,21 +469,37 @@ def visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes,
             linewidth=2, edgecolor=colour, facecolor="none"
         ))
         w, h = size
-        label = f"#{i+1}  {w:.0f}x{h:.0f}  {angle:.1f}°  ({area:,} px)"
+        lbl = f"#{i+1}  {w:.0f}x{h:.0f}  {angle:.1f}°  ({area:,} px)"
         if is_outlier:
-            label += "  ⚠ outlier"
+            lbl += "  ⚠ outlier"
         bbox_ax.text(
-            center[0], center[1] - 20, label,
+            center[0], center[1] - 20, lbl,
             color=colour, fontsize=7, fontweight="bold",
             bbox=dict(facecolor="black", alpha=0.45, pad=1, edgecolor="none"),
         )
 
-    # Hide any image cells that are unused (spare cells between images and text panel)
-    for ax in list(axs.flat)[n_plots:-1]:
-        ax.axis("off")
+    # ── Panel 4: watershed on outliers (or same as panel 3) ──────────
+    ws_ax = axs.flat[4]
+    has_outliers = bool(outlier_analysis and outlier_analysis['outliers'])
+    if has_outliers and watershed_img is not None:
+        ws_ax.imshow(watershed_img)
+        ws_ax.set_title("Watershed on outliers")
+    else:
+        ws_ax.imshow(overlay)
+        ws_ax.set_title(f"No outliers — edges + bboxes ({len(bboxes)} instruments)")
+        for i, bbox in enumerate(bboxes):
+            center, size, angle, area = bbox
+            is_outlier = id(bbox) in outlier_bboxes
+            colour = "red" if is_outlier else "lime"
+            box_points = np.int32(cv.boxPoints(((center[0], center[1]), size, angle)))
+            ws_ax.add_patch(mpatches.Polygon(
+                box_points, closed=True,
+                linewidth=2, edgecolor=colour, facecolor="none"
+            ))
+    ws_ax.axis("off")
 
-    # Bottom-right panel: per-bbox stats table
-    text_ax = axs.flat[-1]
+    # ── Panel 5: per-bbox stats table ────────────────────────────────
+    text_ax = axs.flat[5]
     text_ax.set_xticks([])
     text_ax.set_yticks([])
     for spine in text_ax.spines.values():
@@ -641,10 +636,13 @@ def _process_image(image_path, cfg, debugging=False):
         print(f"    #{i+1}  center=({cx:.1f},{cy:.1f})  size={w:.1f}x{h:.1f}  angle={angle:.1f}°  area={area:,} px{flag}")
 
     if debugging:
+        watershed_img = apply_watershed_to_outliers(seg_binary, outlier_analysis)
         visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes,
                           reflection_mask, image_label=image_label,
                           outlier_analysis=outlier_analysis,
-                          filter_stats=filter_stats)
+                          filter_stats=filter_stats,
+                          img_rgb=img_rgb, roi_bbox=roi_bbox,
+                          watershed_img=watershed_img)
 
     return tray_no_bg, seg_binary, bboxes, outlier_analysis, filter_stats
 
