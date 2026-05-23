@@ -54,7 +54,7 @@ class PreprocessConfig:
     # -- Specular reflection detection / repair (detect_specular_reflections) --
     reflection_v_threshold: int = 240
     reflection_s_threshold: int = 30
-    remove_reflections: bool = True
+    inpaint_reflections: bool = True
     reflection_inpaint_radius: int = 15
 
     # -- Segmentation (segment_instruments) --
