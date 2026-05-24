@@ -22,6 +22,48 @@ from preprocess import (get_ROI_from_color, binarize_image, get_tray_crop,
 from utils      import edge_Laplace
 
 # ------------------------------------------------------------------ #
+#  Watershed segment colours                                          #
+# ------------------------------------------------------------------ #
+
+# Index 0 → first instrument (label 2), index 1 → second (label 3), …
+_SEGMENT_COLORS = [
+    (220,  40,  40),   # red   — instrument 1
+    ( 40, 200,  40),   # green — instrument 2
+    ( 40,  80, 220),   # blue
+    (220, 200,  40),   # yellow
+    (180,  40, 220),   # violet
+]
+
+
+def _make_segment_rgba(markers, alpha=0.55):
+    """RGBA float32 overlay colouring each watershed segment distinctly.
+
+    Foreground labels (≥ 2 after the +1 marker offset) are filled with
+    _SEGMENT_COLORS in label order.  The watershed boundary (label == -1)
+    is drawn white and fully opaque.  Background / unknown (0, 1) are
+    fully transparent so the underlying image shows through.
+
+    Args:
+        markers: int32 (H, W) from cv.watershed.
+        alpha:   opacity for the coloured segment fill (0–1).
+
+    Returns:
+        RGBA float32 (H, W, 4) with values in [0, 1].
+    """
+    h, w = markers.shape
+    overlay = np.zeros((h, w, 4), dtype=np.float32)
+    for i, label in enumerate(sorted(set(markers.flat) - {-1, 0, 1})):
+        r, g, b = _SEGMENT_COLORS[i % len(_SEGMENT_COLORS)]
+        mask = markers == label
+        overlay[mask, 0] = r / 255.0
+        overlay[mask, 1] = g / 255.0
+        overlay[mask, 2] = b / 255.0
+        overlay[mask, 3] = alpha
+    overlay[markers == -1] = [1.0, 1.0, 1.0, 1.0]   # boundary → white, opaque
+    return overlay
+
+
+# ------------------------------------------------------------------ #
 #  Step 0 — Morphological close to connect nearby edges              #
 # ------------------------------------------------------------------ #
 
@@ -291,7 +333,7 @@ def _analyze_bbox_outliers(binary, bboxes, component_threshold=1.5,
 #  Step 6 — Watershed on outlier bboxes (debug / trial)             #
 # ------------------------------------------------------------------ #
 
-def apply_watershed_to_outliers(seg_binary, outlier_analysis):
+def apply_watershed_to_outliers(seg_binary, outlier_analysis, cfg):
     """Apply watershed localised to each outlier bbox to split fused instruments.
 
     Uses the distance transform of the binary mask as the flooding height map.
@@ -301,24 +343,22 @@ def apply_watershed_to_outliers(seg_binary, outlier_analysis):
     Args:
         seg_binary:       uint8 binary mask (H, W).
         outlier_analysis: dict from _analyze_bbox_outliers.
+        cfg:              PreprocessConfig.
 
     Returns:
-        RGB uint8 image (H, W, 3) with each recovered segment coloured
-        distinctly and boundaries in red, or None if there are no outliers.
+        Tuple (dist_map, segment_overlay) where:
+          dist_map:         float32 (H, W, )  — distance-transform height, non-zero
+                            only inside outlier bboxes; peaks = instrument centres.
+          segment_overlay:  float32 (H, W, 4) — RGBA overlay: instrument 1 red,
+                            instrument 2 green, watershed boundary white.
+        Returns None if there are no outliers.
     """
     if not outlier_analysis or not outlier_analysis['outliers']:
         return None
 
     h_img, w_img = seg_binary.shape
-    result = cv.cvtColor(seg_binary, cv.COLOR_GRAY2RGB)
-
-    seg_colors = [
-        ( 50, 200,  50),
-        ( 50,  50, 220),
-        (220, 200,  50),
-        (220,  50, 220),
-        ( 50, 220, 220),
-    ]
+    dist_map         = np.zeros((h_img, w_img), dtype=np.float32)
+    segment_overlay  = np.zeros((h_img, w_img, 4), dtype=np.float32)
 
     for entry in outlier_analysis['outliers']:
         bbox = entry['bbox']
@@ -329,7 +369,7 @@ def apply_watershed_to_outliers(seg_binary, outlier_analysis):
         cv.fillPoly(full_mask, [box_pts], 255)
 
         ax, ay, aw, ah = cv.boundingRect(box_pts)
-        x1, y1 = max(0, ax),         max(0, ay)
+        x1, y1 = max(0, ax),          max(0, ay)
         x2, y2 = min(w_img, ax + aw), min(h_img, ay + ah)
         if x2 <= x1 or y2 <= y1:
             continue
@@ -337,15 +377,30 @@ def apply_watershed_to_outliers(seg_binary, outlier_analysis):
         roi_bin = cv.bitwise_and(seg_binary[y1:y2, x1:x2],
                                   full_mask[y1:y2, x1:x2])
 
-        dist = cv.distanceTransform(roi_bin, cv.DIST_L2, 5)
+        dist = cv.distanceTransform(roi_bin, cv.DIST_L2, cfg.ws_dist_mask_size)
         if dist.max() < 1.0:
             continue
 
-        _, sure_fg = cv.threshold(dist, 0.5 * dist.max(), 255, cv.THRESH_BINARY)
+        # Accumulate distance values (take max so overlapping bboxes merge cleanly)
+        dist_map[y1:y2, x1:x2] = np.maximum(dist_map[y1:y2, x1:x2], dist)
+
+        _, sure_fg = cv.threshold(dist, cfg.ws_sure_fg_threshold * dist.max(), 255, cv.THRESH_BINARY)
         sure_fg = sure_fg.astype(np.uint8)
 
-        kernel  = cv.getStructuringElement(cv.MORPH_ELLIPSE, (5, 5))
-        sure_bg = cv.dilate(roi_bin, kernel, iterations=2)
+        # Bridge nearby seed fragments that belong to the SAME instrument.
+        # Serrations, reflection gaps, and ridge wobble fracture the
+        # distance-ridge of one instrument into multiple sure_fg blobs.
+        # Each blob becomes a separate watershed seed → over-segmentation.
+        # A small MORPH_CLOSE fuses fragments along the spine. The kernel
+        # must stay smaller than the gap between two real instrument peaks
+        # (typically 50–200 px) so true contacts are NOT merged.
+        seed_merge_kernel = cv.getStructuringElement(
+            cv.MORPH_ELLIPSE, cfg.ws_seed_merge_kernel
+        )
+        sure_fg = cv.morphologyEx(sure_fg, cv.MORPH_CLOSE, seed_merge_kernel)
+
+        kernel  = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.ws_sure_bg_dilate_kernel)
+        sure_bg = cv.dilate(roi_bin, kernel, iterations=cfg.ws_sure_bg_dilate_iters)
         unknown = cv.subtract(sure_bg, sure_fg)
 
         num_labels, markers = cv.connectedComponents(sure_fg)
@@ -359,13 +414,259 @@ def apply_watershed_to_outliers(seg_binary, outlier_analysis):
         roi_3ch  = cv.merge([inv_dist, inv_dist, inv_dist])
         cv.watershed(roi_3ch, markers)
 
-        for label in range(2, num_labels + 1):
-            color = seg_colors[(label - 2) % len(seg_colors)]
-            result[y1:y2, x1:x2][markers == label] = color
+        # Composite coloured segments into the full-image overlay (max-alpha blend)
+        seg_rgba = _make_segment_rgba(markers)
+        for c in range(4):
+            segment_overlay[y1:y2, x1:x2, c] = np.maximum(
+                segment_overlay[y1:y2, x1:x2, c], seg_rgba[:, :, c]
+            )
 
-        result[y1:y2, x1:x2][markers == -1] = (255, 50, 50)
+    return dist_map, segment_overlay
 
-    return result
+
+# ------------------------------------------------------------------ #
+#  Step 7 — Debug helper for split_fused_instruments                 #
+# ------------------------------------------------------------------ #
+
+def _debug_split_figure(
+    seg_binary: np.ndarray,
+    cut_mask: np.ndarray,
+    boundary_mask: np.ndarray,
+    ws_bboxes: list,
+    outlier_analysis: dict,
+    dist_map: np.ndarray | None,
+    cfg,
+) -> None:
+    """Show a 4-panel debug figure for each outlier bbox that was cut.
+
+    Panels (per outlier bbox, cropped to the oriented-box region):
+      1. Binary ROI before the cut
+      2. Distance-transform heatmap  (colorbar; 'not available' if dist_map=None)
+      3. Watershed cut line — white pixels on black
+      4. Binary mask after the cut, with new split bboxes drawn in green
+
+    All windows are opened simultaneously; a single key-press closes them.
+    Only called when cfg.debug is True.
+
+    Args:
+        seg_binary:       uint8 (H, W) full binary mask before the cut.
+        cut_mask:         uint8 (H, W) binary mask after cv.subtract + MORPH_OPEN.
+        boundary_mask:    uint8 (H, W) watershed boundary pixels = 255.
+        ws_bboxes:        list of (center, size, angle, area) from split_fused_instruments.
+        outlier_analysis: dict from _analyze_bbox_outliers() — supplies the per-bbox crops.
+        dist_map:         float32 (H, W) or None — distance transform for Panel 2.
+        cfg:              PreprocessConfig — used for ws_heatmap_colormap.
+    """
+    outliers = outlier_analysis.get('outliers', [])
+    if not outliers:
+        return
+
+    h_img, w_img = seg_binary.shape
+
+    for idx, entry in enumerate(outliers):
+        bbox = entry['bbox']
+        center, size, angle = bbox[0], bbox[1], bbox[2]
+
+        # Compute the axis-aligned bounding rect of the oriented bbox
+        box_pts   = np.int32(cv.boxPoints((center, size, angle)))
+        full_mask = np.zeros((h_img, w_img), dtype=np.uint8)
+        cv.fillPoly(full_mask, [box_pts], 255)
+
+        ax_, ay_, aw_, ah_ = cv.boundingRect(box_pts)
+        x1, y1 = max(0, ax_),           max(0, ay_)
+        x2, y2 = min(w_img, ax_ + aw_), min(h_img, ay_ + ah_)
+        if x2 <= x1 or y2 <= y1:
+            continue
+
+        # Mask crops to the oriented-box shape (not just the rectangle)
+        box_crop = full_mask[y1:y2, x1:x2]
+
+        # Panel 1 — binary ROI before the cut, clipped to the oriented box
+        roi_bin = cv.bitwise_and(seg_binary[y1:y2, x1:x2], box_crop)
+
+        # Panel 2 — distance-transform crop (may be None if not supplied)
+        dist_crop = dist_map[y1:y2, x1:x2] if dist_map is not None else None
+
+        # Panel 3 — watershed cut line cropped to the bbox region
+        boundary_crop = boundary_mask[y1:y2, x1:x2]
+
+        # Panel 4 — cut result in colour so we can overlay the green bboxes
+        cut_crop = cut_mask[y1:y2, x1:x2].copy()
+        cut_rgb  = cv.cvtColor(cut_crop, cv.COLOR_GRAY2RGB)
+
+        # Draw only the ws_bboxes whose centres fall inside this outlier's
+        # crop region — these are the instruments produced by THIS cut.
+        # Shift coordinates to the local (crop-relative) frame before drawing.
+        for ws_cx, ws_cy, ws_size, ws_angle in [
+            (b[0][0], b[0][1], b[1], b[2]) for b in ws_bboxes
+        ]:
+            if x1 <= ws_cx < x2 and y1 <= ws_cy < y2:
+                local_pts = np.int32(cv.boxPoints(
+                    ((ws_cx - x1, ws_cy - y1), ws_size, ws_angle)
+                ))
+                cv.polylines(cut_rgb, [local_pts], isClosed=True,
+                             color=(0, 255, 0), thickness=2)
+
+        # Build the 1×4 figure
+        fig, axs = plt.subplots(1, 4, figsize=(18, 5))
+        fig.suptitle(
+            f"Watershed split — outlier #{idx + 1}  "
+            f"centre=({center[0]:.0f}, {center[1]:.0f})  "
+            f"size={size[0]:.0f}×{size[1]:.0f}  angle={angle:.1f}°",
+            fontsize=10, fontweight="bold",
+        )
+
+        axs[0].imshow(roi_bin, cmap='gray')
+        axs[0].set_title("Binary ROI\n(before cut)")
+        axs[0].axis('off')
+
+        if dist_crop is not None:
+            cmap = cfg.ws_heatmap_colormap if cfg is not None else 'hot'
+            im = axs[1].imshow(dist_crop, cmap=cmap, interpolation='nearest')
+            fig.colorbar(im, ax=axs[1], fraction=0.046, pad=0.04,
+                         label='Distance (px)')
+            axs[1].set_title("Distance transform\n(watershed height map)")
+        else:
+            axs[1].text(0.5, 0.5, 'dist_map\nnot available',
+                        ha='center', va='center', transform=axs[1].transAxes,
+                        fontsize=9)
+            axs[1].set_title("Distance transform\n(not available)")
+        axs[1].axis('off')
+
+        axs[2].imshow(boundary_crop, cmap='gray')
+        axs[2].set_title("Watershed cut line\n(boundary mask)")
+        axs[2].axis('off')
+
+        axs[3].imshow(cut_rgb)
+        axs[3].set_title("After cut + new bboxes\n(green = split instruments)")
+        axs[3].axis('off')
+
+        plt.tight_layout()
+
+        # Render to a cv2 window (same pattern as visualise_results)
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', dpi=96, bbox_inches='tight')
+        buf.seek(0)
+        img_cv = cv.imdecode(
+            np.frombuffer(buf.getvalue(), dtype=np.uint8), cv.IMREAD_COLOR
+        )
+        plt.close()
+
+        try:
+            import subprocess, re
+            xrandr_out = subprocess.run(
+                ['xrandr', '--current'], capture_output=True, text=True
+            ).stdout
+            m = re.search(r'(\d+)x(\d+)\+0\+0', xrandr_out)
+            sw, sh = (int(m.group(1)), int(m.group(2))) if m else (1920, 1080)
+        except Exception:
+            sw, sh = 1920, 1080
+
+        h_cv, w_cv = img_cv.shape[:2]
+        scale = min((sw - 80) / w_cv, (sh - 80) / h_cv, 1.0)
+        if scale < 1.0:
+            img_cv = cv.resize(
+                img_cv, (int(w_cv * scale), int(h_cv * scale)),
+                interpolation=cv.INTER_AREA,
+            )
+
+        win = f"Watershed split — outlier #{idx + 1}"
+        cv.namedWindow(win, cv.WINDOW_NORMAL)
+        cv.imshow(win, img_cv)
+        cv.resizeWindow(win, img_cv.shape[1], img_cv.shape[0])
+
+    # Block until any key is pressed, then close all split-debug windows
+    cv.waitKey(0)
+    cv.destroyAllWindows()
+
+
+# ------------------------------------------------------------------ #
+#  Step 7 — Split fused instruments using the watershed cut line     #
+# ------------------------------------------------------------------ #
+
+def split_fused_instruments(
+    seg_binary: np.ndarray,
+    boundary_mask: np.ndarray,
+    outlier_analysis: dict,
+    cfg: PreprocessConfig,
+    dist_map: np.ndarray | None = None,
+) -> list[tuple]:
+    """Use the watershed cut line to separate fused-instrument blobs and
+    extract one oriented bounding box per individual instrument.
+
+    Pipeline:
+      1. Subtract boundary_mask from seg_binary  → physical gap at the cut line.
+      2. Morphological OPEN (3×3 ellipse)         → remove single-pixel cut artefacts.
+      3. Find external contours on the cleaned mask.
+      4. Discard contours below cfg.seg_min_contour_area (cut debris / reflections).
+      5. Fit a minimum-area oriented bbox to each surviving contour.
+
+    Args:
+        seg_binary:       uint8 (H, W) — full binary mask; instruments = 255.
+        boundary_mask:    uint8 (H, W) — watershed boundary pixels = 255.
+                          Derived from the RGBA overlay returned by
+                          apply_watershed_to_outliers().
+        outlier_analysis: dict from _analyze_bbox_outliers(); used only for
+                          the optional debug crop panels (per-bbox figures).
+        cfg:              PreprocessConfig; reuses cfg.seg_min_contour_area
+                          and cfg.debug.
+        dist_map:         Optional float32 (H, W) distance-transform map from
+                          apply_watershed_to_outliers(); only needed for debug
+                          Panel 2 (colorbar heatmap).  Safe to omit in
+                          production.
+
+    Returns:
+        List of (center, (width, height), angle, area) 4-tuples — the same
+        format as _find_bboxes() — one per separated instrument found inside
+        the outlier regions after cutting.  Returns an empty list if no
+        contours survive the area filter (e.g. cut failed to separate blobs).
+    """
+    # Step 1 — Apply the physical cut.
+    # cv.subtract is saturated arithmetic: 255 − 255 = 0, 255 − 0 = 255.
+    # Every pixel ON the boundary line becomes 0, carving a gap that breaks
+    # the touching blobs into disconnected pieces.
+    cut_mask = cv.subtract(seg_binary, boundary_mask)
+
+    # Step 2 — Morphological open (small ellipse, 3×3).
+    # The subtraction leaves single-pixel spike artefacts along the incision
+    # edge.  Opening = erosion-then-dilation: it erases those tiny protrusions
+    # while keeping the larger instrument blobs intact.
+    open_kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, (3, 3))
+    cut_mask    = cv.morphologyEx(cut_mask, cv.MORPH_OPEN, open_kernel)
+
+    # Step 3 — Detect external contours.
+    # RETR_EXTERNAL returns only the outermost boundary of each connected
+    # blob, giving us one contour per separated instrument.
+    contours, _ = cv.findContours(
+        cut_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE
+    )
+
+    # Step 4 — Area filter.
+    # Tiny fragments left by the cut (e.g. isolated pixels at the incision
+    # site, or small reflection artefacts) are discarded.  We reuse the same
+    # minimum-area threshold applied in the initial _find_bboxes() step.
+    valid_contours = [
+        cnt for cnt in contours
+        if cv.contourArea(cnt) >= cfg.seg_min_contour_area
+    ]
+
+    # Step 5 — Fit one oriented bbox per surviving contour.
+    # cv.minAreaRect returns (center, (w, h), angle); we append the integer
+    # contour area to match the 4-tuple format used throughout the pipeline.
+    ws_bboxes = []
+    for cnt in valid_contours:
+        center, size, angle = cv.minAreaRect(cnt)
+        area = int(cv.contourArea(cnt))
+        ws_bboxes.append((center, size, angle, area))
+
+    # Optional debug visualisation (4-panel figure per outlier bbox)
+    if cfg.debug and outlier_analysis and outlier_analysis.get('outliers'):
+        _debug_split_figure(
+            seg_binary, cut_mask, boundary_mask,
+            ws_bboxes, outlier_analysis, dist_map, cfg,
+        )
+
+    return ws_bboxes
 
 
 # ------------------------------------------------------------------ #
@@ -375,14 +676,30 @@ def apply_watershed_to_outliers(seg_binary, outlier_analysis):
 def segment_instruments(tray_no_bg, cfg):
     """Detect instrument bounding boxes from the background-removed tray image.
 
+    Pipeline steps:
+      0. Morphological close  — bridge small gaps between edges.
+      1. Sauvola binarization — local-threshold binary mask.
+      2. _find_bboxes         — oriented bboxes for every contour above min area.
+      3. _filter_by_median_area — drop implausibly small blobs.
+      4. _analyze_bbox_outliers — classify bboxes as normal / outlier (fused).
+      5. apply_watershed_to_outliers — find the cut line between fused blobs.
+      6. split_fused_instruments — cut and re-detect one bbox per instrument.
+
     Args:
         tray_no_bg: RGB image from remove_blue_background (H, W, 3);
                     blue background and outer border are zeroed.
         cfg:        PreprocessConfig.
 
     Returns:
-        seg_binary: uint8 binary mask (H, W); instruments = 255.
-        bboxes:     list of (x, y, w, h, area), sorted largest-first.
+        seg_binary:       uint8 binary mask (H, W); instruments = 255.
+        final_bboxes:     list of (center, (w, h), angle, area) 4-tuples,
+                          one per detected instrument.  Outlier bboxes are
+                          replaced by the watershed-split result; normal
+                          bboxes are unchanged.
+        outlier_analysis: dict from _analyze_bbox_outliers() — retains the
+                          pre-split outlier information for downstream use
+                          (visualisation, watershed_compare, etc.).
+        filter_stats:     dict from _filter_by_median_area().
     """
     tray_closed      = _connect_edges(tray_no_bg, cfg)
     seg_binary       = _binarize_tray(tray_closed, cfg)
@@ -393,7 +710,48 @@ def segment_instruments(tray_no_bg, cfg):
         cfg.seg_outlier_grade_threshold,
         cfg.seg_outlier_secondary_ratio,
     )
-    return seg_binary, bboxes, outlier_analysis, filter_stats
+
+    # Partition bboxes so we know which ones are kept as-is (normal) and
+    # which ones will be replaced by the watershed-split result (outlier).
+    normal_bboxes  = [e['bbox'] for e in outlier_analysis['normal']]
+    outlier_bboxes = [e['bbox'] for e in outlier_analysis['outliers']]
+
+    # Run watershed to find the cut line between fused instrument blobs.
+    # Returns (dist_map, segment_overlay) or None if there are no outliers.
+    ws_result = apply_watershed_to_outliers(seg_binary, outlier_analysis, cfg)
+
+    if ws_result is not None:
+        dist_map, segment_overlay = ws_result
+
+        # Derive a uint8 boundary mask from the RGBA segment overlay.
+        # apply_watershed_to_outliers() returns an RGBA float32 overlay, not
+        # a bare uint8 mask.  Inside _make_segment_rgba(), watershed boundary
+        # pixels (markers == -1) are set to [1.0, 1.0, 1.0, 1.0] — fully
+        # opaque white.  Segment fill pixels have alpha 0.55; background has
+        # alpha 0.0.  A threshold of 0.9 cleanly separates boundaries from
+        # every other pixel type.
+        boundary_mask = (
+            (segment_overlay[..., 3] > 0.9) &   # fully opaque  → only boundaries
+            (segment_overlay[..., 0] > 0.9)       # white R-channel → confirms white
+        ).astype(np.uint8) * 255
+
+        # Split the fused blobs along the cut line and get one bbox per
+        # separated instrument.
+        ws_bboxes = split_fused_instruments(
+            seg_binary, boundary_mask, outlier_analysis, cfg,
+            dist_map=dist_map,
+        )
+
+        # Replace outlier bboxes with the split results; leave normal bboxes
+        # untouched.  If split_fused_instruments returns an empty list (e.g.
+        # the cut did not separate anything) the outliers simply vanish —
+        # which is better than keeping the fused blob as a false positive.
+        final_bboxes = normal_bboxes + ws_bboxes
+    else:
+        # No outliers detected — nothing to cut; keep original bboxes intact.
+        final_bboxes = normal_bboxes + outlier_bboxes
+
+    return seg_binary, final_bboxes, outlier_analysis, filter_stats
 
 
 # ------------------------------------------------------------------ #
@@ -403,7 +761,7 @@ def segment_instruments(tray_no_bg, cfg):
 def visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes,
                       reflection_mask=None, image_label=None, outlier_analysis=None,
                       filter_stats=None, img_rgb=None, roi_bbox=None,
-                      watershed_img=None):
+                      watershed_img=None, cfg=None):
     """Plot 6-panel grid (2×3):
       [0] Original image + ROI bbox  [1] Specular reflections  [2] Binary mask
       [3] Edges + bboxes             [4] Watershed on outliers [5] Stats table
@@ -478,12 +836,17 @@ def visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes,
             bbox=dict(facecolor="black", alpha=0.45, pad=1, edgecolor="none"),
         )
 
-    # ── Panel 4: watershed on outliers (or same as panel 3) ──────────
+    # ── Panel 4: watershed heatmap (distance transform) ──────────────
     ws_ax = axs.flat[4]
     has_outliers = bool(outlier_analysis and outlier_analysis['outliers'])
     if has_outliers and watershed_img is not None:
-        ws_ax.imshow(watershed_img)
-        ws_ax.set_title("Watershed on outliers")
+        dist_map, segment_overlay = watershed_img
+        cmap = cfg.ws_heatmap_colormap if cfg is not None else 'hot'
+        im = ws_ax.imshow(dist_map, cmap=cmap, interpolation='nearest')
+        ws_ax.imshow(segment_overlay, interpolation='nearest')   # red/green fill + white boundary
+        fig.colorbar(im, ax=ws_ax, fraction=0.046, pad=0.04, label='Distance (px)')
+        ws_ax.set_title("Watershed — distance transform heatmap\n"
+                        "red = instrument 1 · green = instrument 2 · white = boundary")
     else:
         ws_ax.imshow(overlay)
         ws_ax.set_title(f"No outliers — edges + bboxes ({len(bboxes)} instruments)")
@@ -636,13 +999,13 @@ def _process_image(image_path, cfg, debugging=False):
         print(f"    #{i+1}  center=({cx:.1f},{cy:.1f})  size={w:.1f}x{h:.1f}  angle={angle:.1f}°  area={area:,} px{flag}")
 
     if debugging:
-        watershed_img = apply_watershed_to_outliers(seg_binary, outlier_analysis)
+        watershed_img = apply_watershed_to_outliers(seg_binary, outlier_analysis, cfg)
         visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes,
                           reflection_mask, image_label=image_label,
                           outlier_analysis=outlier_analysis,
                           filter_stats=filter_stats,
                           img_rgb=img_rgb, roi_bbox=roi_bbox,
-                          watershed_img=watershed_img)
+                          watershed_img=watershed_img, cfg=cfg)
 
     return tray_no_bg, seg_binary, bboxes, outlier_analysis, filter_stats
 

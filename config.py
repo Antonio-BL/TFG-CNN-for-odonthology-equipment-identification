@@ -65,3 +65,16 @@ class PreprocessConfig:
     seg_median_area_threshold: float = 0.2
     seg_outlier_grade_threshold: float = 1.8  # grade > XX × median grade ⇒ outlier candidate
     seg_outlier_secondary_ratio: float = 1.5  # among candidates, drop any with grade < max_candidate_grade / 1.5
+
+    # -- Watershed (apply_watershed_to_outliers) --
+    ws_sure_fg_threshold: float = 0.3          # fraction of dist.max() above which pixels are definite foreground seeds
+    ws_seed_merge_kernel: tuple[int, int] = (15, 15)    # MORPH_CLOSE kernel applied to sure_fg before connectedComponents.
+                                                         # Bridges seed fragments inside a single instrument (caused by
+                                                         # serrations, reflection gaps, ridge wobble). Must be SMALLER than
+                                                         # the typical gap between the distance-ridge peaks of two touching
+                                                         # instruments — otherwise it will merge true instruments. (15, 15)
+                                                         # is a good default for dental tools at the current image resolution.
+    ws_sure_bg_dilate_kernel: tuple[int, int] = (5, 5)  # ellipse kernel for dilating the ROI to define sure background
+    ws_sure_bg_dilate_iters: int = 2           # dilation iterations for sure-background mask
+    ws_dist_mask_size: int = 5                 # distance-transform mask size (3 = faster, 5 = more accurate)
+    ws_heatmap_colormap: str = 'hot'           # matplotlib colormap for the distance-transform heatmap panel
