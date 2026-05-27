@@ -1,8 +1,9 @@
 numpy
 pandas
-opencv-python
+opencv-python-headless
 scikit-image
 matplotlib
+PyQt5
 seaborn
 torch
 torchvision

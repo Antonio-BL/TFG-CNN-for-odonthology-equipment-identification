@@ -2,17 +2,13 @@
 # Segments surgical instruments from the background-removed tray image.
 # Pipeline: binarize (Sauvola) -> contour detection -> bounding boxes -> visualise
 
-import io
 import os
-import platform
 import numpy as np
 import cv2 as cv
+import matplotlib
+matplotlib.use('Qt5Agg')   # interactive backend; requires PyQt5 (pip install PyQt5)
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-
-if platform.system() == "Linux":
-    os.environ["QT_QPA_PLATFORM"] = "xcb" # Force x11 on wayland DEs
-    os.environ["DISPLAY"] = os.environ.get("DISPLAY", ":0")
 
 from skimage.filters import threshold_sauvola
 
@@ -84,13 +80,15 @@ def _binarize_tray(tray_no_bg, cfg):
     Sauvola adapts the threshold per-pixel based on local mean and std,
     preserving fine instrument detail better than a global Otsu threshold. Dilation afterwards."""
     gray   = cv.cvtColor(tray_no_bg, cv.COLOR_RGB2GRAY)
-    thresh = threshold_sauvola(gray, window_size=cfg.sauvola_window_size, k=cfg.sauvola_k)
+    thresh = threshold_sauvola(
+        gray, window_size=cfg.seg_sauvola_window_size, k=cfg.seg_sauvola_k
+    )
     binary = (gray > thresh).astype(np.uint8) * 255
     # dilation and closing
     dilating_kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.seg_close_kernel_dims)
     dilated_img = cv.morphologyEx(binary, cv.MORPH_DILATE, dilating_kernel)
-    opening_kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.open_kernel_dims)
-    opened_img = cv.morphologyEx(dilated_img, cv.MORPH_OPEN, opening_kernel) 
+    opening_kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.bin_open_kernel_dims)
+    opened_img = cv.morphologyEx(dilated_img, cv.MORPH_OPEN, opening_kernel)
     return opened_img
 
 # ------------------------------------------------------------------ #
@@ -208,7 +206,9 @@ def _edge_length_in_bbox(edge_binary, bbox):
 
 
 def _analyze_bbox_outliers(binary, bboxes, component_threshold=1.5,
-                           secondary_ratio=1.5):
+                           secondary_ratio=1.5,
+                           weight_area=0.50, weight_edge=0.25, weight_fill=0.25,
+                           edge_magnitude_threshold=1.0):
     """Classify bboxes into normal and outlier groups using a grade median filter
     with a secondary consistency check for the multiple-outlier scenario.
 
@@ -261,7 +261,7 @@ def _analyze_bbox_outliers(binary, bboxes, component_threshold=1.5,
         }
 
     edge_img    = edge_Laplace(binary.astype(np.float32))
-    edge_binary = (np.abs(edge_img) > 1.0).astype(np.uint8) * 255
+    edge_binary = (np.abs(edge_img) > edge_magnitude_threshold).astype(np.uint8) * 255
 
     bbox_areas   = [b[1][0] * b[1][1] for b in bboxes]
     edge_lengths = [_edge_length_in_bbox(edge_binary, b) for b in bboxes]
@@ -275,7 +275,7 @@ def _analyze_bbox_outliers(binary, bboxes, component_threshold=1.5,
     area_scores = [ba  / min_bbox_area for ba  in bbox_areas]
     edge_scores = [el  / min_edge_len  for el  in edge_lengths]
     fill_scores = [ivf / min_inv_fill  for ivf in inv_fills]
-    grades      = [0.50 * a + 0.25 * e + 0.25 * f
+    grades      = [weight_area * a + weight_edge * e + weight_fill * f
                    for a, e, f in zip(area_scores, edge_scores, fill_scores)]
 
     median_area_score = float(np.median(area_scores))
@@ -374,8 +374,35 @@ def apply_watershed_to_outliers(seg_binary, outlier_analysis, cfg):
         if x2 <= x1 or y2 <= y1:
             continue
 
-        roi_bin = cv.bitwise_and(seg_binary[y1:y2, x1:x2],
-                                  full_mask[y1:y2, x1:x2])
+        # Clip to the oriented bounding-box shape to exclude neighbouring tools.
+        seg_clip = cv.bitwise_and(
+            seg_binary[y1:y2, x1:x2], full_mask[y1:y2, x1:x2]
+        )
+
+        # Identify the dominant contour (= the fused instrument blob).
+        # Any smaller fragment from a neighbouring tool that happens to fall
+        # inside the axis-aligned crop is automatically excluded by taking
+        # the largest contour only.
+        cnts_clip, _ = cv.findContours(
+            seg_clip, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE
+        )
+        if not cnts_clip:
+            continue
+        main_cnt = max(cnts_clip, key=cv.contourArea)
+
+        # Convex hull of the fused blob → second-level localization mask.
+        # The hull is filled and then ANDed with the original binary image so
+        # that watershed sees the real instrument shapes (not a solid polygon),
+        # but only within the hull area.  This has two benefits:
+        #   1. Any fragment of a neighbouring tool that lies outside the hull
+        #      is excluded, even if it is inside the axis-aligned crop.
+        #   2. The watershed region is tighter than the full bounding box,
+        #      reducing exposure to internal ridges (hinge, serrations) that
+        #      lie far from the contact zone.
+        hull      = cv.convexHull(main_cnt)
+        hull_mask = np.zeros(seg_clip.shape, dtype=np.uint8)
+        cv.fillPoly(hull_mask, [hull], 255)
+        roi_bin   = cv.bitwise_and(seg_binary[y1:y2, x1:x2], hull_mask)
 
         dist = cv.distanceTransform(roi_bin, cv.DIST_L2, cfg.ws_dist_mask_size)
         if dist.max() < 1.0:
@@ -384,7 +411,9 @@ def apply_watershed_to_outliers(seg_binary, outlier_analysis, cfg):
         # Accumulate distance values (take max so overlapping bboxes merge cleanly)
         dist_map[y1:y2, x1:x2] = np.maximum(dist_map[y1:y2, x1:x2], dist)
 
-        _, sure_fg = cv.threshold(dist, cfg.ws_sure_fg_threshold * dist.max(), 255, cv.THRESH_BINARY)
+        _, sure_fg = cv.threshold(
+            dist, cfg.ws_sure_fg_threshold * dist.max(), 255, cv.THRESH_BINARY
+        )
         sure_fg = sure_fg.astype(np.uint8)
 
         # Bridge nearby seed fragments that belong to the SAME instrument.
@@ -403,7 +432,7 @@ def apply_watershed_to_outliers(seg_binary, outlier_analysis, cfg):
         sure_bg = cv.dilate(roi_bin, kernel, iterations=cfg.ws_sure_bg_dilate_iters)
         unknown = cv.subtract(sure_bg, sure_fg)
 
-        num_labels, markers = cv.connectedComponents(sure_fg)
+        _, markers = cv.connectedComponents(sure_fg)
         markers = (markers + 1).astype(np.int32)
         markers[unknown == 255] = 0
 
@@ -415,7 +444,7 @@ def apply_watershed_to_outliers(seg_binary, outlier_analysis, cfg):
         cv.watershed(roi_3ch, markers)
 
         # Composite coloured segments into the full-image overlay (max-alpha blend)
-        seg_rgba = _make_segment_rgba(markers)
+        seg_rgba = _make_segment_rgba(markers, alpha=cfg.ws_overlay_alpha)
         for c in range(4):
             segment_overlay[y1:y2, x1:x2, c] = np.maximum(
                 segment_overlay[y1:y2, x1:x2, c], seg_rgba[:, :, c]
@@ -522,15 +551,53 @@ def _debug_split_figure(
 
         if dist_crop is not None:
             cmap = cfg.ws_heatmap_colormap if cfg is not None else 'hot'
-            im = axs[1].imshow(dist_crop, cmap=cmap, interpolation='nearest')
+            im = axs[1].imshow(dist_crop, cmap=cmap, interpolation='bilinear')
             fig.colorbar(im, ax=axs[1], fraction=0.046, pad=0.04,
                          label='Distance (px)')
-            axs[1].set_title("Distance transform\n(watershed height map)")
+
+            # Topographic contour isolines (level every ~10 % of max height)
+            n_levels = 10
+            axs[1].contour(
+                dist_crop,
+                levels=np.linspace(0, dist_crop.max(), n_levels + 2)[1:-1],
+                colors='white', linewidths=0.6, alpha=0.55,
+            )
+
+            # Gradient vector field (downsampled for readability).
+            # gy, gx = gradient of the distance transform (points uphill).
+            # We invert them so arrows point toward the background (downhill) —
+            # the direction water flows on the watershed landscape.
+            gy, gx = np.gradient(dist_crop.astype(np.float32))
+            step = max(dist_crop.shape[0] // 20, dist_crop.shape[1] // 20, 8)
+            rows_q = np.arange(step // 2, dist_crop.shape[0], step)
+            cols_q = np.arange(step // 2, dist_crop.shape[1], step)
+            C, R   = np.meshgrid(cols_q, rows_q)
+            U      = -gx[R, C]   # downhill x
+            V      =  gy[R, C]   # downhill y (image y increases downward)
+            mag_q  = np.hypot(U, V)
+            # Normalise so all arrows are the same length; hide zero-gradient points
+            nonzero = mag_q > 1e-6
+            U[nonzero] /= mag_q[nonzero]
+            V[nonzero] /= mag_q[nonzero]
+            U[~nonzero] = 0.0
+            V[~nonzero] = 0.0
+            axs[1].quiver(
+                C, R, U, V,
+                mag_q,
+                cmap='cool', alpha=0.75,
+                scale=25, scale_units='inches',
+                headwidth=3, headlength=4,
+            )
+
+            axs[1].set_title(
+                "Topograph — dist. transform\n"
+                "isolines + downhill gradient field"
+            )
         else:
             axs[1].text(0.5, 0.5, 'dist_map\nnot available',
                         ha='center', va='center', transform=axs[1].transAxes,
                         fontsize=9)
-            axs[1].set_title("Distance transform\n(not available)")
+            axs[1].set_title("Topograph\n(not available)")
         axs[1].axis('off')
 
         axs[2].imshow(boundary_crop, cmap='gray')
@@ -543,41 +610,9 @@ def _debug_split_figure(
 
         plt.tight_layout()
 
-        # Render to a cv2 window (same pattern as visualise_results)
-        buf = io.BytesIO()
-        plt.savefig(buf, format='png', dpi=96, bbox_inches='tight')
-        buf.seek(0)
-        img_cv = cv.imdecode(
-            np.frombuffer(buf.getvalue(), dtype=np.uint8), cv.IMREAD_COLOR
-        )
-        plt.close()
-
-        try:
-            import subprocess, re
-            xrandr_out = subprocess.run(
-                ['xrandr', '--current'], capture_output=True, text=True
-            ).stdout
-            m = re.search(r'(\d+)x(\d+)\+0\+0', xrandr_out)
-            sw, sh = (int(m.group(1)), int(m.group(2))) if m else (1920, 1080)
-        except Exception:
-            sw, sh = 1920, 1080
-
-        h_cv, w_cv = img_cv.shape[:2]
-        scale = min((sw - 80) / w_cv, (sh - 80) / h_cv, 1.0)
-        if scale < 1.0:
-            img_cv = cv.resize(
-                img_cv, (int(w_cv * scale), int(h_cv * scale)),
-                interpolation=cv.INTER_AREA,
-            )
-
-        win = f"Watershed split — outlier #{idx + 1}"
-        cv.namedWindow(win, cv.WINDOW_NORMAL)
-        cv.imshow(win, img_cv)
-        cv.resizeWindow(win, img_cv.shape[1], img_cv.shape[0])
-
-    # Block until any key is pressed, then close all split-debug windows
-    cv.waitKey(0)
-    cv.destroyAllWindows()
+    # Show all per-outlier figures simultaneously; blocks until user closes them.
+    plt.show()
+    plt.close('all')
 
 
 # ------------------------------------------------------------------ #
@@ -597,69 +632,102 @@ def split_fused_instruments(
     Pipeline:
       1. Subtract boundary_mask from seg_binary  → physical gap at the cut line.
       2. Morphological OPEN (3×3 ellipse)         → remove single-pixel cut artefacts.
-      3. Find external contours on the cleaned mask.
-      4. Discard contours below cfg.seg_min_contour_area (cut debris / reflections).
-      5. Fit a minimum-area oriented bbox to each surviving contour.
+      3. Per outlier: recompute convex hull from seg_binary (pre-cut, stable).
+      4. AND cut_mask with the hull mask           → contour search restricted to
+         the fused-blob region; no other instrument is ever touched.
+      5. Find external contours inside the hull, discard below seg_min_contour_area.
+      6. Fit oriented bboxes; apply median-area filter across all collected bboxes.
 
     Args:
         seg_binary:       uint8 (H, W) — full binary mask; instruments = 255.
         boundary_mask:    uint8 (H, W) — watershed boundary pixels = 255.
                           Derived from the RGBA overlay returned by
                           apply_watershed_to_outliers().
-        outlier_analysis: dict from _analyze_bbox_outliers(); used only for
-                          the optional debug crop panels (per-bbox figures).
+        outlier_analysis: dict from _analyze_bbox_outliers(); used to iterate
+                          over the outlier bboxes and for the debug figure.
         cfg:              PreprocessConfig; reuses cfg.seg_min_contour_area
                           and cfg.debug.
         dist_map:         Optional float32 (H, W) distance-transform map from
-                          apply_watershed_to_outliers(); only needed for debug
-                          Panel 2 (colorbar heatmap).  Safe to omit in
-                          production.
+                          apply_watershed_to_outliers(); only needed for the
+                          debug Panel 2 colorbar heatmap.
 
     Returns:
         List of (center, (width, height), angle, area) 4-tuples — the same
         format as _find_bboxes() — one per separated instrument found inside
-        the outlier regions after cutting.  Returns an empty list if no
-        contours survive the area filter (e.g. cut failed to separate blobs).
+        the outlier hull regions after cutting.  Returns an empty list if no
+        contours survive the area filter.
     """
     # Step 1 — Apply the physical cut.
-    # cv.subtract is saturated arithmetic: 255 − 255 = 0, 255 − 0 = 255.
-    # Every pixel ON the boundary line becomes 0, carving a gap that breaks
-    # the touching blobs into disconnected pieces.
     cut_mask = cv.subtract(seg_binary, boundary_mask)
 
-    # Step 2 — Morphological open (small ellipse, 3×3).
-    # The subtraction leaves single-pixel spike artefacts along the incision
-    # edge.  Opening = erosion-then-dilation: it erases those tiny protrusions
-    # while keeping the larger instrument blobs intact.
-    open_kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, (3, 3))
-    cut_mask    = cv.morphologyEx(cut_mask, cv.MORPH_OPEN, open_kernel)
-
-    # Step 3 — Detect external contours.
-    # RETR_EXTERNAL returns only the outermost boundary of each connected
-    # blob, giving us one contour per separated instrument.
-    contours, _ = cv.findContours(
-        cut_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE
+    # Step 2 — Morphological open removes single-pixel spike artefacts left
+    # along the incision edge after the subtraction.
+    open_kernel = cv.getStructuringElement(
+        cv.MORPH_ELLIPSE, cfg.seg_split_open_kernel_dims
     )
+    cut_mask = cv.morphologyEx(cut_mask, cv.MORPH_OPEN, open_kernel)
 
-    # Step 4 — Area filter.
-    # Tiny fragments left by the cut (e.g. isolated pixels at the incision
-    # site, or small reflection artefacts) are discarded.  We reuse the same
-    # minimum-area threshold applied in the initial _find_bboxes() step.
-    valid_contours = [
-        cnt for cnt in contours
-        if cv.contourArea(cnt) >= cfg.seg_min_contour_area
-    ]
+    h_img, w_img = seg_binary.shape
+    ws_bboxes    = []
+    outliers     = (outlier_analysis or {}).get('outliers', [])
 
-    # Step 5 — Fit one oriented bbox per surviving contour.
-    # cv.minAreaRect returns (center, (w, h), angle); we append the integer
-    # contour area to match the 4-tuple format used throughout the pipeline.
-    ws_bboxes = []
-    for cnt in valid_contours:
-        center, size, angle = cv.minAreaRect(cnt)
-        area = int(cv.contourArea(cnt))
-        ws_bboxes.append((center, size, angle, area))
+    for entry in outliers:
+        bbox = entry['bbox']
+        center, size, angle = bbox[0], bbox[1], bbox[2]
+        box_pts = np.int32(cv.boxPoints((center, size, angle)))
 
-    # Optional debug visualisation (4-panel figure per outlier bbox)
+        # Axis-aligned bounds of the oriented bbox.
+        ax, ay, aw, ah = cv.boundingRect(box_pts)
+        x1, y1 = max(0, ax),           max(0, ay)
+        x2, y2 = min(w_img, ax + aw),  min(h_img, ay + ah)
+        if x2 <= x1 or y2 <= y1:
+            continue
+
+        # Oriented-box mask clipped to the crop window.
+        full_mask_local = np.zeros((h_img, w_img), dtype=np.uint8)
+        cv.fillPoly(full_mask_local, [box_pts], 255)
+
+        # Step 3 — Re-derive the convex hull from seg_binary (pre-cut).
+        # Using the pre-cut mask ensures the hull faithfully wraps the
+        # ORIGINAL fused blob, not the already-cut result which may be split.
+        seg_clip = cv.bitwise_and(
+            seg_binary[y1:y2, x1:x2], full_mask_local[y1:y2, x1:x2]
+        )
+        cnts_clip, _ = cv.findContours(
+            seg_clip, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE
+        )
+        if not cnts_clip:
+            continue
+        main_cnt   = max(cnts_clip, key=cv.contourArea)
+        hull_local = cv.convexHull(main_cnt)             # shape (N, 1, 2), local coords
+
+        # Shift hull to full-image coordinates and build the hull mask.
+        hull_full = (hull_local + np.array([[[x1, y1]]])).astype(np.int32)
+        hull_mask = np.zeros((h_img, w_img), dtype=np.uint8)
+        cv.fillPoly(hull_mask, [hull_full], 255)
+
+        # Step 4 — Restrict the cut result to WITHIN the convex hull.
+        # This is the key change: contours from the rest of the image are
+        # invisible here, so no bbox can be created outside the fused blob.
+        cut_hull = cv.bitwise_and(cut_mask, hull_mask)
+
+        # Step 5 — Detect contours and fit bboxes.
+        cnts_split, _ = cv.findContours(
+            cut_hull, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE
+        )
+        for cnt in cnts_split:
+            area = cv.contourArea(cnt)
+            if area >= cfg.seg_min_contour_area:
+                c, s, a = cv.minAreaRect(cnt)
+                ws_bboxes.append((c, s, a, int(area)))
+
+    # Step 6 — Median-area filter across all collected split bboxes.
+    if ws_bboxes:
+        ws_bboxes, _ = _filter_by_median_area(
+            ws_bboxes, cut_mask, cfg.seg_median_area_threshold
+        )
+
+    # Optional debug visualisation (4-panel figure per outlier bbox).
     if cfg.debug and outlier_analysis and outlier_analysis.get('outliers'):
         _debug_split_figure(
             seg_binary, cut_mask, boundary_mask,
@@ -707,8 +775,12 @@ def segment_instruments(tray_no_bg, cfg):
     bboxes, filter_stats = _filter_by_median_area(bboxes, seg_binary, cfg.seg_median_area_threshold)
     outlier_analysis     = _analyze_bbox_outliers(
         seg_binary, bboxes,
-        cfg.seg_outlier_grade_threshold,
-        cfg.seg_outlier_secondary_ratio,
+        component_threshold=cfg.seg_outlier_grade_threshold,
+        secondary_ratio=cfg.seg_outlier_secondary_ratio,
+        weight_area=cfg.seg_outlier_weight_area,
+        weight_edge=cfg.seg_outlier_weight_edge,
+        weight_fill=cfg.seg_outlier_weight_fill,
+        edge_magnitude_threshold=cfg.seg_edge_magnitude_threshold,
     )
 
     # Partition bboxes so we know which ones are kept as-is (normal) and
@@ -802,7 +874,8 @@ def visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes,
 
     # ── Panel 3: Laplacian edges + oriented bboxes ───────────────────
     edge_img    = edge_Laplace(seg_binary.astype(np.float32))
-    edge_binary = np.abs(edge_img) > 1.0
+    edge_thresh = cfg.seg_edge_magnitude_threshold if cfg is not None else 1.0
+    edge_binary = np.abs(edge_img) > edge_thresh
     overlay     = cv.cvtColor(seg_binary, cv.COLOR_GRAY2RGB)
     h_img, w_img = seg_binary.shape
     for bbox in bboxes:
@@ -941,30 +1014,8 @@ def visualise_results(tray_masked, tray_no_bg, seg_binary, bboxes,
 
     plt.tight_layout(rect=[0, 0, 1, 0.96])
 
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=96, bbox_inches='tight')
-    buf.seek(0)
-    img = cv.imdecode(np.frombuffer(buf.getvalue(), dtype=np.uint8), cv.IMREAD_COLOR)
+    plt.show()
     plt.close()
-
-    try:
-        import subprocess, re
-        xrandr_out = subprocess.run(['xrandr', '--current'], capture_output=True, text=True).stdout
-        m = re.search(r'(\d+)x(\d+)\+0\+0', xrandr_out)
-        sw, sh = (int(m.group(1)), int(m.group(2))) if m else (1920, 1080)
-    except Exception:
-        sw, sh = 1920, 1080
-
-    h, w = img.shape[:2]
-    scale = min((sw - 80) / w, (sh - 80) / h, 1.0)
-    if scale < 1.0:
-        img = cv.resize(img, (int(w * scale), int(h * scale)), interpolation=cv.INTER_AREA)
-
-    cv.namedWindow("Debug", cv.WINDOW_NORMAL)
-    cv.imshow("Debug", img)
-    cv.resizeWindow("Debug", img.shape[1], img.shape[0])
-    cv.waitKey(0)
-    cv.destroyAllWindows()
 
 
 # ------------------------------------------------------------------ #
@@ -1048,5 +1099,5 @@ def main(debugging=False, image_path=None):
 
 
 if __name__ == "__main__":
-    IMAGE_PATH ='all' #"./Trays/IMG_3347.jpg"#'all'  # None = random, 'all' = every image in ./Trays, or a specific path
+    IMAGE_PATH = 'all' #"./Trays/IMG_3347.jpg"#'all'  # None = random, 'all' = every image in ./Trays, or a specific path
     main(debugging=True, image_path=IMAGE_PATH)

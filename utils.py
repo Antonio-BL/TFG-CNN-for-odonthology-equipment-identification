@@ -2,7 +2,6 @@
 # Basic dependencies                                                 #
 # ================================================================== #
 import os
-import platform
 import numpy as np
 import pandas as pd
 import pickle
@@ -14,13 +13,6 @@ import matplotlib.pyplot as plt
 # ================================================================== #
 import cv2 as cv
 from scipy.signal import convolve2d
-
-# ================================================================== #
-# Linux support                                                      #
-# ================================================================== #
-# force x11
-if platform.system() == "Linux":
-    os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
 # ================================================================== #
 #  Preprocess Configuration class                                    # 
@@ -223,7 +215,7 @@ def get_avg_color(patches: list[np.ndarray], cfg: PreprocessConfig) -> np.ndarra
     if len(hsv_samples) == 0:
         # Fallback: global median on the full image (still HSV robust)
         # (you can pass the full image instead if you want)
-        return np.array(cfg.ROI_background_color, dtype=np.uint8)
+        return np.array(cfg.roi_background_color, dtype=np.uint8)
 
     hsv_all = np.vstack(hsv_samples)
 

@@ -2,13 +2,9 @@
 # Pipeline: load_images -> get_ROI_from_color -> binarize_image -> get_tray_crop -> remove_blue_background
 
 import os
-import platform
 import numpy as np
 import matplotlib.pyplot as plt
 import cv2 as cv
-
-if platform.system() == "Linux":
-    os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
 from config import PreprocessConfig
 from utils import (open_close_cleanup, get_multi_patches, get_avg_color)
@@ -228,8 +224,8 @@ def binarize_image(image, cfg, filter_array=None):
     else:
         raise ValueError(f"Unknown color_filter_method: {method!r}")
 
-    open_k = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.open_kernel_dims)
-    close_k = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.close_kernel_dims)
+    open_k = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.bin_open_kernel_dims)
+    close_k = cv.getStructuringElement(cv.MORPH_ELLIPSE, cfg.bin_close_kernel_dims)
     mask_bg = cv.morphologyEx(mask_bg, cv.MORPH_OPEN, open_k)
     mask_bg = cv.morphologyEx(mask_bg, cv.MORPH_CLOSE, close_k)
 
@@ -336,8 +332,8 @@ def remove_blue_background(tray_masked, cfg, bg_rgb=None):
     """Zero out blue-background pixels using only the H channel.
 
     Matching on H alone means shadows (which shift S and V but not H)
-    are never misclassified as foreground.  If cfg.remove_reflections is
-    True, specular highlights (high V, low S) are repaired via inpainting
+    are never misclassified as foreground.  If cfg.reflection_inpaint_enabled
+    is True, specular highlights (high V, low S) are repaired via inpainting
     before background classification so their corrected hue and saturation
     are used for the decision rather than their washed-out white values.
 
@@ -356,7 +352,7 @@ def remove_blue_background(tray_masked, cfg, bg_rgb=None):
         tile_grid=cfg.clahe_tile_grid,
     )
 
-    if cfg.remove_reflections:
+    if cfg.reflection_inpaint_enabled:
         reflection_mask = detect_specular_reflections(image_clahe, cfg)
         image_clahe     = _repair_specular_reflections(
                               image_clahe, reflection_mask,
@@ -451,5 +447,5 @@ def main(debugging=False, image_path=None):
 
 
 if __name__ == "__main__":
-    IMAGE_PATH = "./Trays\IMG_3354.jpg"   # set to a path string to load a specific image, e.g. "./Trays/IMG_0042.jpg"
+    IMAGE_PATH = "./Trays/IMG_3354.jpg"   # set to a path string to load a specific image, e.g. "./Trays/IMG_0042.jpg"
     main(debugging=True, image_path=IMAGE_PATH)
