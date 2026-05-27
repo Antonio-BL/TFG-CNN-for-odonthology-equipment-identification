@@ -39,8 +39,8 @@ from preprocess import (get_ROI_from_color, binarize_image, get_tray_crop,
 from segmentation import (
     _connect_edges, _binarize_tray,
     _find_bboxes, _filter_by_median_area, _analyze_bbox_outliers,
-    apply_watershed_to_outliers,
 )
+from watershed import watershed_split
 
 
 # ------------------------------------------------------------------ #
@@ -432,15 +432,13 @@ def run_demo(image_path=None):
     tray_closed      = _connect_edges(tray_no_bg, cfg)
     seg_binary       = _binarize_tray(tray_closed, cfg)
     bboxes           = _find_bboxes(seg_binary, cfg.seg_min_contour_area)
-    bboxes, _        = _filter_by_median_area(bboxes, seg_binary, cfg.seg_median_area_threshold)
+    bboxes           = _filter_by_median_area(bboxes, seg_binary, cfg.seg_median_area_threshold)
     outlier_analysis = _analyze_bbox_outliers(
         seg_binary, bboxes,
-        component_threshold      = cfg.seg_outlier_grade_threshold,
-        secondary_ratio          = cfg.seg_outlier_secondary_ratio,
-        weight_area              = cfg.seg_outlier_weight_area,
-        weight_edge              = cfg.seg_outlier_weight_edge,
-        weight_fill              = cfg.seg_outlier_weight_fill,
-        edge_magnitude_threshold = cfg.seg_edge_magnitude_threshold,
+        component_threshold = cfg.seg_outlier_grade_threshold,
+        secondary_ratio     = cfg.seg_outlier_secondary_ratio,
+        weight_area         = cfg.seg_outlier_weight_area,
+        weight_fill         = cfg.seg_outlier_weight_fill,
     )
 
     print(f"  Scenario     : {outlier_analysis['scenario']}")
@@ -453,11 +451,13 @@ def run_demo(image_path=None):
         return
 
     # ── Watershed ────────────────────────────────────────────────────
-    ws_result = apply_watershed_to_outliers(seg_binary, outlier_analysis, cfg)
-    if ws_result is None:
-        print("  Watershed returned no result.")
+    outlier_bboxes = [e['bbox'] for e in outlier_analysis['outliers']]
+    _split_bboxes, _boundary_mask, dist_map = watershed_split(
+        seg_binary, outlier_bboxes, cfg
+    )
+    if dist_map.max() < 1.0:
+        print("  Watershed returned an empty distance map — skipping.")
         return
-    dist_map, segment_overlay = ws_result
 
     # ── Per-blob analysis ────────────────────────────────────────────
     h_img, w_img = seg_binary.shape
@@ -467,27 +467,19 @@ def run_demo(image_path=None):
         center, size, angle = bbox[0], bbox[1], bbox[2]
         box_pts = np.int32(cv.boxPoints((center, size, angle)))
 
-        full_mask = np.zeros((h_img, w_img), dtype=np.uint8)
-        cv.fillPoly(full_mask, [box_pts], 255)
-
         ax, ay, aw, ah = cv.boundingRect(box_pts)
         x1, y1 = max(0, ax),           max(0, ay)
         x2, y2 = min(w_img, ax + aw),  min(h_img, ay + ah)
         if x2 <= x1 or y2 <= y1:
             continue
 
-        # Re-derive hull mask (identical logic to apply_watershed_to_outliers)
-        seg_clip = cv.bitwise_and(
-            seg_binary[y1:y2, x1:x2], full_mask[y1:y2, x1:x2]
+        # Crop the binary mask using the oriented bbox (no hull — consistent
+        # with watershed_split which also uses the plain bbox mask).
+        bbox_mask_full = np.zeros((h_img, w_img), dtype=np.uint8)
+        cv.fillPoly(bbox_mask_full, [box_pts], 255)
+        roi_bin = cv.bitwise_and(
+            seg_binary[y1:y2, x1:x2], bbox_mask_full[y1:y2, x1:x2]
         )
-        cnts, _ = cv.findContours(seg_clip, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
-        if not cnts:
-            continue
-        main_cnt  = max(cnts, key=cv.contourArea)
-        hull      = cv.convexHull(main_cnt)
-        hull_mask = np.zeros(seg_clip.shape, dtype=np.uint8)
-        cv.fillPoly(hull_mask, [hull], 255)
-        roi_bin   = cv.bitwise_and(seg_binary[y1:y2, x1:x2], hull_mask)
 
         dist_crop = dist_map[y1:y2, x1:x2]
         if dist_crop.max() < 1.0:
