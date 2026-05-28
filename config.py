@@ -116,3 +116,14 @@ class PreprocessConfig:
 
     # cv.distanceTransform mask size: 3 = faster, 5 = more accurate.
     ws_dist_mask_size: int = 5
+
+    # -- Concave point detection (Miró-Nicolau et al. 2024) -------------------
+    # k-curvature look-around step (vertices on each side of the candidate).
+    cp_k: int = 9
+    # Minimum / maximum high-curvature run length for _find_rois_recursive.
+    cp_lmin: int = 6
+    cp_lmax: int = 25
+    # Threshold increment at each recursion level.
+    cp_delta_t: float = 0.1
+    # RDP simplification epsilon (pixels).  Larger → fewer vertices.
+    cp_rdp_epsilon: float = 2.0
