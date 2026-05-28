@@ -127,3 +127,10 @@ class PreprocessConfig:
     cp_delta_t: float = 0.1
     # RDP simplification epsilon (pixels).  Larger → fewer vertices.
     cp_rdp_epsilon: float = 2.0
+
+    # -- Concave-point cut (separates fused instruments) ----------------------
+    # Width of the black cut line drawn through each best concave point.
+    # 3–7 px is enough to fully separate two instruments after the dilation
+    # applied in _binarize_tray, while remaining narrow enough that the
+    # resulting per-instrument bboxes keep an accurate footprint.
+    concave_cut_line_width: int = 5

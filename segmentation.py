@@ -368,6 +368,29 @@ def _analyze_bbox_outliers(
 #  Public API                                                         #
 # ------------------------------------------------------------------ #
 
+def find_bboxes(seg_binary: np.ndarray, cfg: PreprocessConfig) -> list[tuple]:
+    """Find oriented bboxes from a binary mask (no re-binarisation).
+
+    Used to re-segment after concave_cut has modified the binary mask.
+    Runs only the bbox-detection + median-area filter steps; the Sauvola
+    binarisation is skipped because the input is already a clean mask.
+
+    Args:
+        seg_binary: uint8 (H, W) binary mask; instruments = 255.
+        cfg:        PreprocessConfig (reads seg_min_contour_area and
+                    seg_median_area_threshold).
+
+    Returns:
+        List of (center, size, angle, contour_area) 4-tuples, sorted by
+        descending contour area.
+    """
+    bboxes = _find_bboxes(seg_binary, cfg.seg_min_contour_area)
+    bboxes = _filter_by_median_area(
+        bboxes, seg_binary, cfg.seg_median_area_threshold,
+    )
+    return bboxes
+
+
 def segment_instruments(
     tray_no_bg: np.ndarray,
     cfg: PreprocessConfig,
