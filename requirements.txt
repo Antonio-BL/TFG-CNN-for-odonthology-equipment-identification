@@ -7,4 +7,6 @@ PyQt5
 seaborn
 torch
 torchvision
+scikit-learn
+tqdm
 jupyter

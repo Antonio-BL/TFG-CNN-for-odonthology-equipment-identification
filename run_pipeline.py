@@ -15,6 +15,8 @@
 #     → plot_segmentation_results (when debugging=True)
 
 import os
+os.environ.setdefault('KMP_DUPLICATE_LIB_OK', 'TRUE')
+
 import numpy as np
 import cv2 as cv
 
@@ -26,13 +28,43 @@ from preprocess     import (
 from segmentation   import segment_instruments, find_bboxes
 from concave_points import detect_concave_points
 from concave_cut    import select_best_concave_points, apply_concave_cuts, _concave_grade
-from visualize      import plot_segmentation_results
+from visualize      import plot_segmentation_results, plot_pipeline_result
+from classify       import build_classifier, classify_crop, ToolClassifier
+from classifier_config import ClassifierConfig
+
+
+def _extract_tool_crop(image_rgb: np.ndarray, bbox: tuple) -> np.ndarray:
+    """Deskew the oriented bbox region into an upright RGB crop.
+
+    Orders the four boxPoints as TL/TR/BR/BL, then uses getPerspectiveTransform
+    + warpPerspective to produce a straight (w, h) view of the instrument.
+    Returns a uint8 RGB array.
+    """
+    center, size, angle = bbox[0], bbox[1], bbox[2]
+    pts = cv.boxPoints(((center[0], center[1]), size, angle)).astype(np.float32)
+
+    s = pts.sum(axis=1)           # x + y
+    d = pts[:, 0] - pts[:, 1]    # x - y
+    tl = pts[np.argmin(s)]
+    br = pts[np.argmax(s)]
+    tr = pts[np.argmax(d)]
+    bl = pts[np.argmin(d)]
+
+    w = max(1, int(round(float(np.linalg.norm(tr - tl)))))
+    h = max(1, int(round(float(np.linalg.norm(bl - tl)))))
+
+    src = np.array([tl, tr, br, bl], dtype=np.float32)
+    dst = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], dtype=np.float32)
+    M = cv.getPerspectiveTransform(src, dst)
+    return cv.warpPerspective(image_rgb, M, (w, h))
 
 
 def _process_image(
     image_path: str,
     cfg: PreprocessConfig,
     debugging: bool = False,
+    classifier: ToolClassifier | None = None,
+    class_names: list[str] | None = None,
 ) -> tuple:
     """Run the full pipeline on a single image and optionally display results.
 
@@ -41,30 +73,25 @@ def _process_image(
       2. Preprocessing: ROI crop, blue-background removal, reflection inpaint.
       3. segment_instruments: binarise, find bboxes, classify outliers.
       4. detect_concave_points: curvature analysis on outlier (fused) bboxes.
-      5. select_best_concave_points + apply_concave_cuts: cut each fused blob
-         with a thin black line through the candidate with max chord_len.
+      5. select_best_concave_points + apply_concave_cuts: cut each fused blob.
       6. find_bboxes on the cut mask → final per-instrument bboxes.
-      7. Optionally show the 6-panel overview figure.
+      7. Optional: extract deskewed crops and classify each instrument.
+      8. Optionally show the overview and/or classification result figures.
 
     Args:
-        image_path: Absolute or relative path to a JPEG/PNG image file.
-        cfg:        PreprocessConfig controlling all pipeline parameters.
-        debugging:  When True, display the visualisation figure.
+        image_path:  Absolute or relative path to a JPEG/PNG image file.
+        cfg:         PreprocessConfig controlling all pipeline parameters.
+        debugging:   When True, display the visualisation figure(s).
+        classifier:  Optional ToolClassifier; when given, each final bbox is
+                     classified and the result is included in the return tuple.
+        class_names: Ordered list of class names from classifier.class_names.
 
     Returns:
-        6-tuple: (tray_no_bg, seg_binary, seg_binary_cut, final_bboxes,
-                  outlier_analysis, concave_pts)
-          tray_no_bg:       RGB image after background removal (H, W, 3).
-          seg_binary:       uint8 binary mask BEFORE the concave cut.
-          seg_binary_cut:   uint8 binary mask AFTER the concave cut (== seg_binary
-                            when there are no outliers).
-          final_bboxes:     bboxes detected on seg_binary_cut — one per instrument
-                            after fused pairs have been separated.
-          outlier_analysis: Dict from _analyze_bbox_outliers (pre-cut state).
-          concave_pts:      dict[int, list[dict]] from detect_concave_points;
-                            keyed by 0-based outlier bbox index.  Each dict has:
-                            'x', 'y', 'kappa', 'roi_len', 'roi_kappa_mean',
-                            'roi_kappa_max', 'chord_len'.
+        9-tuple: (tray_no_bg, seg_binary, seg_binary_cut, final_bboxes,
+                  outlier_analysis, concave_pts, crops, pred_labels, confidences)
+          crops:       list of deskewed RGB crops (one per final bbox).
+          pred_labels: predicted class name strings (empty when no classifier).
+          confidences: float confidence scores (empty when no classifier).
     """
     img_bgr = cv.imread(image_path)
     if img_bgr is None:
@@ -138,11 +165,23 @@ def _process_image(
                     f'{grade:>6.3f}  {is_best}'
                 )
 
+    # ── Classification ───────────────────────────────────────────────────────
+    crops: list[np.ndarray] = []
+    pred_labels: list[str] = []
+    confidences: list[float] = []
+    if classifier is not None:
+        for bbox in final_bboxes:
+            crop = _extract_tool_crop(tray_no_bg, bbox)
+            label_idx, conf = classify_crop(classifier, crop)
+            name = class_names[label_idx] if class_names else str(label_idx)
+            crops.append(crop)
+            pred_labels.append(name)
+            confidences.append(conf)
+        print(f'  Classifications: '
+              + ', '.join(f'{n} ({c:.0%})' for n, c in zip(pred_labels, confidences)))
+
     # ── Visualisation ────────────────────────────────────────────────────────
     if debugging:
-        # Pass the pre-cut `bboxes` so outliers are highlighted in red on Panel
-        # [1,0].  Pass `seg_binary_cut` + `final_bboxes` so Panel [1,1] shows
-        # the post-cut state when there were anomalies.
         plot_segmentation_results(
             tray_masked, tray_no_bg, seg_binary, bboxes,
             reflection_mask=reflection_mask,
@@ -155,23 +194,43 @@ def _process_image(
             seg_binary_cut=seg_binary_cut if outlier_bboxes else None,
             final_bboxes=final_bboxes   if outlier_bboxes else None,
         )
+        if classifier is not None:
+            plot_pipeline_result(
+                tray_no_bg, final_bboxes, crops, pred_labels, confidences,
+                image_label=image_label,
+                save_path=f'./pipeline_results/{image_label}_result.png',
+            )
 
     return (tray_no_bg, seg_binary, seg_binary_cut, final_bboxes,
-            outlier_analysis, concave_pts)
+            outlier_analysis, concave_pts, crops, pred_labels, confidences)
 
 
-def main(debugging: bool = False, image_path: str | None = None) -> object:
+def main(
+    debugging: bool = False,
+    image_path: str | None = None,
+    classify: bool = False,
+) -> object:
     """Run the pipeline on one image (random if None) or all images in ./Trays.
 
     Args:
         debugging:   Show visualisation figures after processing each image.
         image_path:  Path to a specific image, None for a random image,
                      or 'all' to process every image found in ./Trays.
+        classify:    When True, build a ToolClassifier once and classify every
+                     detected instrument crop.  Results are included in the
+                     returned tuple(s) and a figure is saved to ./pipeline_results/.
 
     Returns:
-        Single 6-tuple from _process_image, or a list of them when image_path='all'.
+        Single 9-tuple from _process_image, or a list of them when image_path='all'.
     """
     cfg = PreprocessConfig()
+
+    classifier = None
+    class_names = None
+    if classify:
+        print('[pipeline] Building classifier (runs once)…')
+        classifier = build_classifier(ClassifierConfig())
+        class_names = classifier.class_names
 
     def _collect_paths() -> list[str]:
         paths = sorted(
@@ -190,7 +249,10 @@ def main(debugging: bool = False, image_path: str | None = None) -> object:
         results = []
         for path in all_paths:
             try:
-                results.append(_process_image(path, cfg, debugging=debugging))
+                results.append(_process_image(
+                    path, cfg, debugging=debugging,
+                    classifier=classifier, class_names=class_names,
+                ))
             except Exception as exc:
                 print(f'  [error] {path}: {exc}')
         return results
@@ -199,7 +261,10 @@ def main(debugging: bool = False, image_path: str | None = None) -> object:
         all_paths  = _collect_paths()
         image_path = all_paths[np.random.randint(0, len(all_paths))]
 
-    return _process_image(image_path, cfg, debugging=debugging)
+    return _process_image(
+        image_path, cfg, debugging=debugging,
+        classifier=classifier, class_names=class_names,
+    )
 
 
 if __name__ == '__main__':

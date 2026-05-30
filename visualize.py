@@ -8,6 +8,9 @@
 # draws it; it never produces data nor returns results to the pipeline.
 # Algorithm modules never import from here.
 
+import math
+import pathlib
+
 import numpy as np
 import cv2 as cv
 import matplotlib
@@ -15,6 +18,7 @@ matplotlib.use('Qt5Agg')   # interactive backend; requires PyQt5
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.lines   as mlines
+import matplotlib.gridspec as gridspec
 
 from config       import PreprocessConfig
 from utils        import edge_Laplace
@@ -349,5 +353,87 @@ def plot_segmentation_results(
     )
 
     plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.show()
+    plt.close()
+
+
+def plot_pipeline_result(
+    tray_rgb: np.ndarray,
+    final_bboxes: list[tuple],
+    crops: list[np.ndarray],
+    pred_labels: list[str],
+    confidences: list[float],
+    image_label: str | None = None,
+    save_path: str | None = None,
+    warn_threshold: float = 0.6,
+) -> None:
+    """2-panel figure: annotated tray image (left) + deskewed crop gallery (right).
+
+    Left panel: tray_rgb with each final bbox drawn as a polygon labelled
+    "{name}  {conf:.0%}" at the box centre.  Lime = conf >= warn_threshold,
+    orange = below threshold.
+
+    Right panel: grid gallery of deskewed crops, each subplot titled with the
+    predicted name and confidence (orange title when conf < warn_threshold).
+
+    Saves to save_path when given (parent dirs created automatically),
+    then always calls plt.show().
+    """
+    n = len(crops)
+    ncols = min(5, max(1, n))
+    nrows = max(1, math.ceil(n / ncols)) if n > 0 else 1
+
+    fig = plt.figure(figsize=(14, max(6, 3 * nrows)))
+    if image_label:
+        fig.suptitle(image_label, fontsize=13, fontweight='bold')
+
+    outer = gridspec.GridSpec(1, 2, figure=fig, width_ratios=[1.2, 1], wspace=0.05)
+
+    # ── Left panel: annotated tray ───────────────────────────────────────────
+    ax_tray = fig.add_subplot(outer[0])
+    ax_tray.imshow(tray_rgb)
+    ax_tray.set_title('Segmentation + classification', fontsize=10)
+    ax_tray.axis('off')
+
+    for bbox, name, conf in zip(final_bboxes, pred_labels, confidences):
+        center, size, angle, _ = bbox
+        box_pts = np.int32(cv.boxPoints(((center[0], center[1]), size, angle)))
+        colour = 'lime' if conf >= warn_threshold else 'orange'
+        ax_tray.add_patch(mpatches.Polygon(
+            box_pts, closed=True,
+            linewidth=2, edgecolor=colour, facecolor='none',
+        ))
+        ax_tray.text(
+            center[0], center[1],
+            f'{name}  {conf:.0%}',
+            color=colour, fontsize=8, fontweight='bold',
+            ha='center', va='center',
+            bbox=dict(facecolor='black', alpha=0.55, pad=2, edgecolor='none'),
+        )
+
+    # ── Right panel: crop gallery ────────────────────────────────────────────
+    if n > 0:
+        inner = gridspec.GridSpecFromSubplotSpec(
+            nrows, ncols, subplot_spec=outer[1], hspace=0.5, wspace=0.3,
+        )
+        for i, (crop, name, conf) in enumerate(zip(crops, pred_labels, confidences)):
+            ax = fig.add_subplot(inner[i])
+            ax.imshow(crop)
+            title_colour = 'black' if conf >= warn_threshold else 'darkorange'
+            ax.set_title(f'{name}\n{conf:.0%}', fontsize=8, color=title_colour)
+            ax.axis('off')
+        for j in range(n, nrows * ncols):
+            fig.add_subplot(inner[j]).axis('off')
+    else:
+        ax_empty = fig.add_subplot(outer[1])
+        ax_empty.text(0.5, 0.5, 'No instruments detected',
+                      ha='center', va='center', transform=ax_empty.transAxes,
+                      fontsize=11, color='gray')
+        ax_empty.axis('off')
+
+    if save_path is not None:
+        pathlib.Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+
     plt.show()
     plt.close()
