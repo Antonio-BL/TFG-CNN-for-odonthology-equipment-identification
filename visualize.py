@@ -9,13 +9,21 @@
 # Algorithm modules never import from here.
 
 import math
+import os
 import pathlib
 
 import numpy as np
 import cv2 as cv
 import matplotlib
-matplotlib.use('Qt5Agg')   # interactive backend; requires PyQt5
-import matplotlib.pyplot as plt
+_forced = os.environ.get('MPLBACKEND')
+_candidates = ([_forced] if _forced else []) + ['Qt5Agg', 'TkAgg', 'Agg']
+for _backend in _candidates:
+    try:
+        matplotlib.use(_backend)
+        import matplotlib.pyplot as plt
+        break
+    except Exception:
+        continue
 import matplotlib.patches as mpatches
 import matplotlib.lines   as mlines
 import matplotlib.gridspec as gridspec

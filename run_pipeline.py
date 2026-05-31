@@ -31,6 +31,7 @@ from concave_cut    import select_best_concave_points, apply_concave_cuts, _conc
 from visualize      import plot_segmentation_results, plot_pipeline_result
 from classify       import build_classifier, classify_crop, ToolClassifier
 from classifier_config import ClassifierConfig
+from tool_names    import display_name
 
 
 def _extract_tool_crop(image_rgb: np.ndarray, bbox: tuple) -> np.ndarray:
@@ -171,9 +172,10 @@ def _process_image(
     confidences: list[float] = []
     if classifier is not None:
         for bbox in final_bboxes:
-            crop = _extract_tool_crop(tray_no_bg, bbox)
+            crop = _extract_tool_crop(roi_crop, bbox)
             label_idx, conf = classify_crop(classifier, crop)
-            name = class_names[label_idx] if class_names else str(label_idx)
+            raw = class_names[label_idx] if class_names else str(label_idx)
+            name = display_name(raw)
             crops.append(crop)
             pred_labels.append(name)
             confidences.append(conf)
@@ -196,7 +198,7 @@ def _process_image(
         )
         if classifier is not None:
             plot_pipeline_result(
-                tray_no_bg, final_bboxes, crops, pred_labels, confidences,
+                tray_masked, final_bboxes, crops, pred_labels, confidences,
                 image_label=image_label,
                 save_path=f'./pipeline_results/{image_label}_result.png',
             )
@@ -269,4 +271,4 @@ def main(
 
 if __name__ == '__main__':
     IMAGE_PATH = 'all'   # None = random · 'all' = every image · or a specific path
-    main(debugging=True, image_path=IMAGE_PATH)
+    main(debugging=True, image_path=IMAGE_PATH, classify=True)

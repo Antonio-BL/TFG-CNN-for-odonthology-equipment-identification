@@ -91,15 +91,15 @@ def apply_concave_cuts(
     best_points: dict[int, dict | None],
     cfg: PreprocessConfig,
 ) -> np.ndarray:
-    """Return a copy of seg_binary with vertical cut lines drawn at the best
+    """Return a copy of seg_binary with short cut lines drawn at the best
     concave point of each outlier bbox.
 
     Per outlier bbox with a non-None best point, draws a black line:
       - centred on the concave point (pt['x'], pt['y']),
-      - VERTICAL in image coordinates (constant x, varying y) regardless
-        of the bbox orientation,
+      - oriented perpendicular to the bbox's LONG axis (so the cut runs
+        across the tool widths, between the two fused instruments),
+      - total length = ¼ of the bbox's long side,
       - thickness = cfg.concave_cut_line_width pixels,
-      - extended well beyond the bbox to guarantee full crossing,
       - pixel value = 0 (background).
 
     Args:
@@ -121,21 +121,31 @@ def apply_concave_cuts(
         if pt is None:
             continue
 
-        _center, size, _angle, _area = bbox
+        _center, size, angle, _area = bbox
         w, h = size
 
-        # Vertical line in image space: x is fixed at the concave point,
-        # y extends in both directions.  Using the bbox diagonal as the
-        # half-length guarantees the line spans the bbox at any rotation.
-        # Drawing extra pixels outside the bbox is harmless — the mask is
-        # already 0 there.
-        half_len = int(np.hypot(w, h) * 0.6)
+        # Orient the cut relative to the fused-bbox geometry instead of the
+        # image axes:
+        #   * cut length  = 1/4 of the bbox's long side
+        #   * cut angle   = perpendicular to the bbox's long axis (so it goes
+        #                   across the tool's width, "between" the two tools
+        #                   that share this fused bbox)
+        # OpenCV minAreaRect stores size as (along-angle, perpendicular-to-angle),
+        # so when w >= h the long axis is the bbox `angle` itself; otherwise it
+        # sits 90° off.
+        long_side = max(w, h)
+        long_axis_deg = angle if w >= h else angle + 90.0
+        cut_angle_rad = np.radians(long_axis_deg + 90.0)
 
-        cx, cy = int(pt['x']), int(pt['y'])
+        half_len = max(1.0, long_side / 8.0)   # 1/8 each side = 1/4 total
+        dx = half_len * np.cos(cut_angle_rad)
+        dy = half_len * np.sin(cut_angle_rad)
+
+        cx, cy = float(pt['x']), float(pt['y'])
         cv.line(
             cut_mask,
-            (cx, cy - half_len),
-            (cx, cy + half_len),
+            (int(round(cx - dx)), int(round(cy - dy))),
+            (int(round(cx + dx)), int(round(cy + dy))),
             color=0, thickness=line_width,
         )
 
