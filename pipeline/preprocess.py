@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import cv2 as cv
 
 from config import PreprocessConfig
-from utils import (open_close_cleanup, get_multi_patches, get_avg_color)
+from utils.utils import (open_close_cleanup, get_multi_patches, get_avg_color)
 
 
 # ------------------------------------------------------------------ #

@@ -28,9 +28,9 @@ import matplotlib.patches as mpatches
 import matplotlib.lines   as mlines
 import matplotlib.gridspec as gridspec
 
-from config       import PreprocessConfig
-from utils        import edge_Laplace
-from concave_cut  import _concave_grade
+from config                import PreprocessConfig
+from utils.utils           import edge_Laplace
+from pipeline.concave_cut  import _concave_grade
 
 
 # Threshold applied to |Laplacian(seg_binary)| when drawing the edge overlay

@@ -25,10 +25,10 @@ import cv2 as cv
 import numpy as np
 
 from config import PreprocessConfig
-from preprocess import get_ROI_from_color, remove_blue_background
-from segmentation import segment_instruments
+from pipeline.preprocess import get_ROI_from_color, remove_blue_background
+from pipeline.segmentation import segment_instruments
 from run_pipeline import _extract_tool_crop
-from progress import img_bar
+from utils.progress import img_bar
 
 
 SRC_ROOT = pathlib.Path("./Tools")

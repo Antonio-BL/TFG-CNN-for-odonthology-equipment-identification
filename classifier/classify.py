@@ -19,8 +19,8 @@ from sklearn.model_selection import StratifiedKFold
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms as T
 from torchvision.models import ResNet18_Weights, resnet18
-from classifier_config import ClassifierConfig
-from progress import fold_bar, img_bar, epoch_bar
+from classifier.classifier_config import ClassifierConfig
+from utils.progress import fold_bar, img_bar, epoch_bar
 
 __all__ = [
     "ToolClassifier",

@@ -11,8 +11,8 @@ os.environ.setdefault('KMP_DUPLICATE_LIB_OK', 'TRUE')
 
 import argparse
 
-from classifier_config import ClassifierConfig
-from classify import train_and_evaluate, finetune_and_evaluate, build_classifier
+from classifier.classifier_config import ClassifierConfig
+from classifier.classify import train_and_evaluate, finetune_and_evaluate, build_classifier
 
 
 def main() -> None:
