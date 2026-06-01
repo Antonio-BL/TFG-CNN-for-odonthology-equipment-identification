@@ -15,12 +15,20 @@ import cv2 as cv
 os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 os.environ.setdefault("DISPLAY", ":0")
 
-from config     import PreprocessConfig
-from preprocess import (get_ROI_from_color, binarize_image, get_tray_crop,
-                        remove_blue_background, detect_specular_reflections)
+import pathlib as _pathlib
+import sys as _sys
+_HERE = _pathlib.Path(__file__).resolve().parent   # debug-utils/
+_ROOT = _HERE.parent                               # project root
+for _p in (str(_ROOT), str(_HERE)):
+    if _p not in _sys.path:
+        _sys.path.insert(0, _p)
 
-import segmentation      as seg_knn
-import segmentation_test as seg_base
+from config     import PreprocessConfig
+from pipeline.preprocess import (get_ROI_from_color, binarize_image, get_tray_crop,
+                                 remove_blue_background, detect_specular_reflections)
+
+import pipeline.segmentation as seg_knn
+import segmentation_test     as seg_base  # lives in debug-utils/ (same folder)
 
 
 TRAYS_DIR   = "./Trays"

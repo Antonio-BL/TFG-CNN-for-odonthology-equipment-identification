@@ -28,13 +28,13 @@ if str(_ROOT) not in sys.path:
 import cv2 as cv  # noqa: E402
 
 from config import PreprocessConfig  # noqa: E402
-from preprocess import (  # noqa: E402
+from pipeline.preprocess import (  # noqa: E402
     get_ROI_from_color,
     binarize_image,
     get_tray_crop,
     remove_blue_background,
 )
-from segmentation import segment_instruments  # noqa: E402
+from pipeline.segmentation import segment_instruments  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants

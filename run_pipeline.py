@@ -20,18 +20,18 @@ os.environ.setdefault('KMP_DUPLICATE_LIB_OK', 'TRUE')
 import numpy as np
 import cv2 as cv
 
-from config         import PreprocessConfig
-from preprocess     import (
+from config                  import PreprocessConfig
+from pipeline.preprocess     import (
     get_ROI_from_color, binarize_image, get_tray_crop,
     remove_blue_background, detect_specular_reflections,
 )
-from segmentation   import segment_instruments, find_bboxes
-from concave_points import detect_concave_points
-from concave_cut    import select_best_concave_points, apply_concave_cuts, _concave_grade
-from visualize      import plot_segmentation_results, plot_pipeline_result
-from classify       import build_classifier, classify_crop, ToolClassifier
-from classifier_config import ClassifierConfig
-from tool_names    import display_name
+from pipeline.segmentation   import segment_instruments, find_bboxes
+from pipeline.concave_points import detect_concave_points
+from pipeline.concave_cut    import select_best_concave_points, apply_concave_cuts, _concave_grade
+from utils.visualize         import plot_segmentation_results, plot_pipeline_result
+from classifier.classify     import build_classifier, classify_crop, ToolClassifier
+from classifier.classifier_config import ClassifierConfig
+from utils.tool_names        import display_name
 
 
 def _extract_tool_crop(image_rgb: np.ndarray, bbox: tuple) -> np.ndarray:

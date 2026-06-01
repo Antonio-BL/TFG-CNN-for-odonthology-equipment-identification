@@ -24,10 +24,16 @@ import numpy as np
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("DISPLAY", ":0")
 
+import pathlib as _pathlib
+import sys as _sys
+_ROOT = _pathlib.Path(__file__).resolve().parent.parent
+if str(_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_ROOT))
+
 from config      import PreprocessConfig
-from preprocess  import (get_ROI_from_color, binarize_image, get_tray_crop,
-                         remove_blue_background)
-from segmentation import segment_instruments, _compute_bbox_stats
+from pipeline.preprocess  import (get_ROI_from_color, binarize_image, get_tray_crop,
+                                  remove_blue_background)
+from pipeline.segmentation import segment_instruments, _compute_bbox_stats
 
 TRAYS_DIR  = "./Trays"
 OUTPUT_CSV = "./segmentation_results.csv"

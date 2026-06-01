@@ -38,8 +38,8 @@ import matplotlib.patches as mpatches
 import matplotlib.gridspec as gridspec
 from matplotlib.colors import to_rgba
 
-from run_pipeline import main as run_pipeline
-from concave_cut  import _concave_grade
+from run_pipeline              import main as run_pipeline
+from pipeline.concave_cut      import _concave_grade
 
 # ── Palette ──────────────────────────────────────────────────────────────────
 # Distinct colours for up to 12 concave points; beyond that the palette wraps.
