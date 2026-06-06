@@ -1,0 +1,9 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Virtual environment (large — never commit)
+venv_TFG/
+
+# Training outputs / model cache
+cnn_results/
