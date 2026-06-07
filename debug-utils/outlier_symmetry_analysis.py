@@ -8,8 +8,9 @@
 #   two genuinely fused (different) tools are not.  This script measures that.
 #
 # What it does, per outlier candidate:
-#   1. Split the outlier's oriented bbox in two with a line PARALLEL to the long
-#      side, through the middle (the "symmetry edge") -> two sub-bounding boxes.
+#   1. Find the shape's SYMMETRY axis from its moments (the major principal axis,
+#      NOT the minAreaRect long side — that one sits askew of an open scissor's
+#      true axis) and split the blob in two along it -> two sub-bounding boxes.
 #   2. For each sub-box compute an image signature — the |Hu moments| of the
 #      contour (magnitude only; sign is reported separately) — plus area/fill.
 #   3. Symmetry metric (simple): the two halves of one tool should have the SAME
@@ -74,8 +75,10 @@ _PROPERTIES = [
 
 # A tool is "symmetric" (→ likely a single open scissor/forceps → do NOT split)
 # when the averaged half-to-half magnitude ratio reaches this.  Tune from the
-# values printed in the verdict block.
-_SYM_THRESHOLD = 0.65
+# values printed in the verdict block.  With the moment-based symmetry axis the
+# Trays3 outliers fall into a clear gap (fused ≤ 0.48, single tools ≥ 0.61), so
+# 0.55 sits between them.
+_SYM_THRESHOLD = 0.55
 
 
 def _colour(idx: int) -> str:
@@ -124,6 +127,43 @@ def _half_corners(c, long_v, short_v, long_len, short_len, side: int) -> np.ndar
     return np.int32([hc - hl + hs, hc + hl + hs, hc + hl - hs, hc - hl - hs])
 
 
+def _symmetry_axes(binary: np.ndarray, bbox: tuple):
+    """Symmetry axis from the SHAPE's moments (principal axis), not the bbox axis.
+
+    minAreaRect's long side can be tilted relative to a tool's true symmetry axis
+    — an open scissor is the clear case: its tight rectangle sits askew of the
+    line that bisects the blades, so splitting on the bbox axis gives two halves
+    that are not mirror images and the symmetry score collapses.  The axis of
+    symmetry of a symmetric shape is always a PRINCIPAL axis, so we take the major
+    principal axis of the blob's moments and centre it on the blob's extent.
+    Falls back to the bbox axes if the blob can't be measured.
+    """
+    box_pts = cv.boxPoints((bbox[0], bbox[1], bbox[2])).astype(np.int32)
+    mask = np.zeros(binary.shape[:2], dtype=np.uint8)
+    cv.fillPoly(mask, [box_pts], 255)
+    cnts, _ = cv.findContours(cv.bitwise_and(binary, mask),
+                              cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return _bbox_axes(bbox)
+    m = cv.moments(max(cnts, key=cv.contourArea))
+    if m['m00'] == 0:
+        return _bbox_axes(bbox)
+    cx, cy = m['m10'] / m['m00'], m['m01'] / m['m00']
+    mu20, mu02, mu11 = m['mu20'] / m['m00'], m['mu02'] / m['m00'], m['mu11'] / m['m00']
+    theta = 0.5 * np.arctan2(2 * mu11, mu20 - mu02)         # major-axis orientation
+    long_v  = np.array([np.cos(theta),  np.sin(theta)])
+    short_v = np.array([-np.sin(theta), np.cos(theta)])
+
+    cnt_pts = max(cnts, key=cv.contourArea).reshape(-1, 2).astype(float) - (cx, cy)
+    pl, ps = cnt_pts @ long_v, cnt_pts @ short_v
+    if (pl.max() - pl.min()) < (ps.max() - ps.min()):       # ensure long = major extent
+        long_v, short_v, pl, ps = short_v, long_v, ps, pl
+    c = (np.array([cx, cy])
+         + long_v * ((pl.max() + pl.min()) / 2.0)
+         + short_v * ((ps.max() + ps.min()) / 2.0))
+    return c, long_v, short_v, float(pl.max() - pl.min()), float(ps.max() - ps.min())
+
+
 def _deskew(binary: np.ndarray, c, long_v, short_v, long_len, short_len) -> np.ndarray:
     """Warp the oriented bbox region to an upright crop (long axis horizontal).
 
@@ -162,7 +202,9 @@ def _signature(mask: np.ndarray) -> dict | None:
 
 def _analyse_outlier(binary: np.ndarray, bbox: tuple) -> dict:
     """Split one outlier bbox, build per-half signatures and the symmetry metric."""
-    c, long_v, short_v, long_len, short_len = _bbox_axes(bbox)
+    # Split on the shape's symmetry (principal) axis, NOT the bbox axis — the bbox
+    # can sit askew of an open scissor's true axis. See _symmetry_axes.
+    c, long_v, short_v, long_len, short_len = _symmetry_axes(binary, bbox)
     crop = _deskew(binary, c, long_v, short_v, long_len, short_len)
 
     h2 = crop.shape[0] // 2
@@ -445,7 +487,7 @@ if __name__ == '__main__':
     # None → one random image · 'all' → every image (close each figure to advance)
     # or a specific path, e.g. './Trays3/IMG_1303.jpg'
     IMAGE_PATH: str | None = None
-    IMAGE_PATH = 'all'
+    IMAGE_PATH =  'all'# "/home/antonio/Documents/TFG-project/debug-utils/IMG_outlier_study2.JPG" #'all'
     if IMAGE_PATH == 'all':
         tray_root = os.path.join(os.path.dirname(__file__), '..', 'Trays3')
         tray_paths = sorted(
