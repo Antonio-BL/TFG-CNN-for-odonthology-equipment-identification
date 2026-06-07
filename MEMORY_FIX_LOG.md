@@ -108,6 +108,20 @@ New Trays2 photos (iPhone 16) processed very wrong. Two distinct causes:
    (counts dropped to a realistic 4-6) and confirmed NO regression on original
    Trays (IMG_3344 still 6 instruments, identical predictions).
 
+## Seventh issue: Trays2/IMG_1271 detected 0 tools
+`get_tray_crop` selects the largest contour whose bounding rect is SMALLER than
+`tray_full_size_tol` (0.99) of the ROI, to skip a full-frame "desk border"
+contour. But when the tray fills the ROI its bounding rect is ~99% too, so the
+real tray (area 20.4M px, 99%x99%) was rejected and the only survivors were
+noise specks (710 px) -> empty tray mask -> 0 instruments. Other images escaped
+this only because their cloth left a margin inside the ROI.
+
+Fix (core, pipeline/preprocess.py): track the largest contour overall and fall
+back to it when the filtered candidate is missing or tiny (best_area < 50% of the
+largest). The full-size filter still wins when a genuine smaller tray contour
+exists. Verified: IMG_1271 0 -> 7 tools; all 23 Trays2 now detect 3-9 tools
+(zero empties); original Trays unchanged (IMG_3344/3345 still 6).
+
 ## Result
 Classifier build peak RAM stays well under 1 GB. Output cached to
 `./cnn_results/classifier.joblib` (+ `class_names.json`).

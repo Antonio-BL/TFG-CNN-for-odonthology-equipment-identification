@@ -274,15 +274,29 @@ def get_tray_crop(roi_crop, binary_mask, cfg):
         raise ValueError("No contours found in binary mask.")
 
     tray_contour = None
-    best_area = -1
+    best_area = -1.0
+    largest_contour = None
+    largest_area = -1.0
     for cnt in contours:
+        area = cv.contourArea(cnt)
+        if area > largest_area:
+            largest_area, largest_contour = area, cnt
         _, _, cw, ch = cv.boundingRect(cnt)
         if cw >= tol * W and ch >= tol * H:
             continue
-        area = cv.contourArea(cnt)
         if area > best_area:
             best_area = area
             tray_contour = cnt
+
+    # When the tray fills the ROI, its bounding rect is ~full-size and the
+    # filter above rejects it, leaving only noise specks (or nothing) — e.g.
+    # Trays2/IMG_1271, where the real tray spans 99% of the ROI and the largest
+    # surviving candidate was 710 px, so the mask came out empty and no tools
+    # were found. In that case the largest contour *is* the tray, so fall back
+    # to it. The full-size filter still wins whenever a genuine smaller tray
+    # contour exists (best_area >= 50% of the largest).
+    if tray_contour is None or best_area < 0.5 * largest_area:
+        tray_contour = largest_contour
 
     if tray_contour is None:
         raise ValueError("No valid tray contour found.")

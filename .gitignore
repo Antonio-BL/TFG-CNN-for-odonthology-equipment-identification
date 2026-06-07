@@ -14,3 +14,6 @@ venv_TFG/
 cnn_results/**/*.pt
 cnn_results/**/*.pth
 cnn_results/**/*.ckpt
+
+# Ad-hoc debug panel dumps (debug_stage.py with SAVE=True) — regenerable scratch
+debug_results/
