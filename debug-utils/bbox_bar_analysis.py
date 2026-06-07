@@ -336,7 +336,9 @@ def plot_bbox_analysis(
 
 def _process_one(result: tuple, label: str) -> None:
     """Unpack a pipeline result tuple and call plot_bbox_analysis."""
-    tray_no_bg, _seg_binary, _seg_cut, _final_bboxes, outlier_analysis, _concave_pts = result
+    # result[:6] — _process_image now also returns crops/pred_labels/confidences
+    # (classification) after these six; take only the segmentation outputs.
+    tray_no_bg, _seg_binary, _seg_cut, _final_bboxes, outlier_analysis, _concave_pts = result[:6]
 
     # Reconstruct the full bbox list in original pipeline order by merging
     # outliers and normals, then sorting by their position in the combined pool.
@@ -362,15 +364,19 @@ if __name__ == '__main__':
     IMAGE_PATH: str | None = None
     IMAGE_PATH = 'all'
     if IMAGE_PATH == 'all':
-        results = run_pipeline(debugging=False, image_path='all')
-        tray_root = os.path.join(os.path.dirname(__file__), '..', 'Trays')
+        tray_root = os.path.join(os.path.dirname(__file__), '..', 'Trays3')
         tray_paths = sorted(
             os.path.join(wd, f)
             for wd, _, files in os.walk(tray_root)
             for f in files
             if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))
         )
-        for path, res in zip(tray_paths, results):
+        # Process one image at a time: run_pipeline(image_path='all') only returns
+        # lightweight summary dicts (to bound memory across the whole dataset),
+        # which can't be plotted. A per-image call returns the full result tuple
+        # and keeps memory bounded to a single image.
+        for path in tray_paths:
+            res = run_pipeline(debugging=False, image_path=path)
             _process_one(res, os.path.basename(path))
     else:
         result = run_pipeline(debugging=False, image_path=IMAGE_PATH)
