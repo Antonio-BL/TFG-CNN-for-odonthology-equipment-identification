@@ -1,0 +1,25 @@
+/home/antonio/Documents/TFG-project/venv_TFG/lib/python3.13/site-packages/sklearn/linear_model/_logistic.py:1184: FutureWarning: 'n_jobs' has no effect since 1.8 and will be removed in 1.10. You provided 'n_jobs=-1', please leave it unspecified.
+  warnings.warn(msg, category=FutureWarning)
+/home/antonio/Documents/TFG-project/venv_TFG/lib/python3.13/site-packages/sklearn/linear_model/_logistic.py:1184: FutureWarning: 'n_jobs' has no effect since 1.8 and will be removed in 1.10. You provided 'n_jobs=-1', please leave it unspecified.
+  warnings.warn(msg, category=FutureWarning)
+/home/antonio/Documents/TFG-project/venv_TFG/lib/python3.13/site-packages/sklearn/linear_model/_logistic.py:1184: FutureWarning: 'n_jobs' has no effect since 1.8 and will be removed in 1.10. You provided 'n_jobs=-1', please leave it unspecified.
+  warnings.warn(msg, category=FutureWarning)
+/home/antonio/Documents/TFG-project/venv_TFG/lib/python3.13/site-packages/sklearn/linear_model/_logistic.py:1184: FutureWarning: 'n_jobs' has no effect since 1.8 and will be removed in 1.10. You provided 'n_jobs=-1', please leave it unspecified.
+  warnings.warn(msg, category=FutureWarning)
+/home/antonio/Documents/TFG-project/venv_TFG/lib/python3.13/site-packages/sklearn/linear_model/_logistic.py:1184: FutureWarning: 'n_jobs' has no effect since 1.8 and will be removed in 1.10. You provided 'n_jobs=-1', please leave it unspecified.
+  warnings.warn(msg, category=FutureWarning)
+CV_DONE in 794s
+mean_accuracy=0.852  std=0.020
+fold_accuracies= [0.862, 0.878, 0.852, 0.852, 0.815]
+per-class F1:
+  Herramienta0     f1=0.88 prec=0.86 recall=0.90 support=81
+  Herramienta1     f1=0.86 prec=0.87 recall=0.86 support=100
+  Herramienta2     f1=0.88 prec=0.89 recall=0.88 support=99
+  Herramienta3     f1=0.83 prec=0.90 recall=0.78 support=100
+  Herramienta4     f1=0.74 prec=0.70 recall=0.78 support=100
+  Herramienta5     f1=0.86 prec=0.84 recall=0.89 support=99
+  Herramienta6     f1=0.81 prec=0.76 recall=0.87 support=100
+  Herramienta7     f1=0.96 prec=0.97 recall=0.95 support=100
+  Herramienta8     f1=0.88 prec=0.91 recall=0.84 support=100
+  Herramienta9     f1=0.82 prec=0.87 recall=0.78 support=100
+macro_f1=0.853

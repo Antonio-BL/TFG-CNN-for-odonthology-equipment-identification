@@ -56,10 +56,16 @@ def _best_tool_bbox(bboxes: list) -> tuple | None:
 
 
 def _is_blue_background(img_bgr: np.ndarray, threshold: float = 0.3) -> bool:
-    """True if a significant share of pixels match the surgical blue cloth."""
+    """True if a significant share of pixels match the surgical blue cloth.
+
+    Saturation cutoff is 20 (not 50): some tools (notably Herramienta0) were shot
+    on a lighter, less-saturated blue cloth (H~104, S~21). At s>50 those 70 images
+    were all rejected, leaving the class with only 30 crops; the hue is squarely
+    blue, so s>20 recovers them. See MEMORY_FIX_LOG.md.
+    """
     hsv = cv.cvtColor(img_bgr, cv.COLOR_BGR2HSV)
     h, s = hsv[..., 0], hsv[..., 1]
-    blue_frac = ((h > 80) & (h < 140) & (s > 50)).mean()
+    blue_frac = ((h > 80) & (h < 140) & (s > 20)).mean()
     return blue_frac > threshold
 
 

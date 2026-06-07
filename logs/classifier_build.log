@@ -1,0 +1,4 @@
+training data_dir: ./pipeline_crops
+/home/antonio/Documents/TFG-project/venv_TFG/lib/python3.13/site-packages/sklearn/linear_model/_logistic.py:1184: FutureWarning: 'n_jobs' has no effect since 1.8 and will be removed in 1.10. You provided 'n_jobs=-1', please leave it unspecified.
+  warnings.warn(msg, category=FutureWarning)
+DONE in 202s; classes=['Herramienta0', 'Herramienta1', 'Herramienta2', 'Herramienta3', 'Herramienta4', 'Herramienta5', 'Herramienta6', 'Herramienta7', 'Herramienta8', 'Herramienta9']

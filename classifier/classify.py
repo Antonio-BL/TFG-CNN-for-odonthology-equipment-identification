@@ -137,6 +137,31 @@ def load_dataset(cfg: ClassifierConfig) -> tuple[list[Image.Image], np.ndarray, 
     return images, np.array(labels, dtype=np.int64), class_names
 
 
+def _load_dataset_paths(cfg: ClassifierConfig) -> tuple[list[pathlib.Path], np.ndarray, list[str]]:
+    """Like load_dataset but returns image *paths* instead of decoded PIL images.
+
+    load_dataset decodes every image into RAM at once; with ~1000 full-res tool
+    photos (~36 MB each decoded) that needs ~36 GB and triggers the OOM killer.
+    build_classifier only touches one image at a time, so it opens each path
+    lazily instead. See MEMORY_FIX_LOG.md.
+    """
+    root = pathlib.Path(cfg.data_dir)
+    folders = sorted(
+        (f for f in root.iterdir() if f.is_dir() and f.name.startswith("Herramienta")),
+        key=lambda p: int(p.name[len("Herramienta"):]),
+    )
+    paths: list[pathlib.Path] = []
+    labels: list[int] = []
+    class_names: list[str] = []
+    for label_idx, folder in enumerate(folders):
+        class_names.append(folder.name)
+        img_paths = sorted(p for ext in ("*.jpg", "*.jpeg", "*.png", "*.bmp") for p in folder.glob(ext))
+        for path in img_paths:
+            paths.append(path)
+            labels.append(label_idx)
+    return paths, np.array(labels, dtype=np.int64), class_names
+
+
 def _build_aug_pipeline(
     preprocess: Callable, cfg: ClassifierConfig
 ) -> Callable[[Image.Image], torch.Tensor]:
@@ -206,6 +231,12 @@ def train_and_evaluate(cfg: ClassifierConfig) -> dict:
     backbone, preprocess = build_backbone()
     aug_pipeline = _build_aug_pipeline(preprocess, cfg)
     images, labels, class_names = load_dataset(cfg)
+    # Perf+RAM: downscale once (longest side 640) so per-fold rotation/jitter
+    # augmentation isn't run on full-size crops (the net sees 224px regardless).
+    # Mirrors the build_classifier fix; also shrinks the in-RAM image list.
+    # See MEMORY_FIX_LOG.md.
+    for im in images:
+        im.thumbnail((640, 640), Image.BILINEAR)
 
     skf = StratifiedKFold(n_splits=cfg.n_folds, shuffle=True, random_state=42)
     fold_accs: list[float] = []
@@ -385,7 +416,8 @@ def build_classifier(cfg: ClassifierConfig) -> ToolClassifier:
         return ToolClassifier(backbone, clf, preprocess, class_names, mode="frozen")
 
     aug_pipeline = _build_aug_pipeline(preprocess, cfg)
-    images, labels, class_names = load_dataset(cfg)
+    # Lazy paths instead of load_dataset's all-images-in-RAM (OOM). See MEMORY_FIX_LOG.md.
+    paths, labels, class_names = _load_dataset_paths(cfg)
 
     augs = _augs_per_class(labels, cfg.aug_per_image)
 
@@ -393,8 +425,16 @@ def build_classifier(cfg: ClassifierConfig) -> ToolClassifier:
     all_labels: list[int] = []
     n_total = sum(1 + augs[int(lbl)] for lbl in labels)
     with img_bar(n_total, "Building classifier") as bar:
-        for img, lbl in zip(images, labels):
+        for path, lbl in zip(paths, labels):
             lbl = int(lbl)
+            # Open one full-res image at a time, then free it before the next.
+            with Image.open(path) as im:
+                img = im.convert("RGB")
+            # Perf: rotation/jitter augmentation on full-res 12MP photos was the
+            # bottleneck that kept this build from ever finishing (single-threaded
+            # PIL, ~4000 copies). The net only ever sees a 224px square, so
+            # downscale once up front (longest side 640px). See MEMORY_FIX_LOG.md.
+            img.thumbnail((640, 640), Image.BILINEAR)
             all_feats.append(extract_features(backbone, preprocess(img)))
             all_labels.append(lbl)
             bar.update(1)
@@ -402,6 +442,9 @@ def build_classifier(cfg: ClassifierConfig) -> ToolClassifier:
                 all_feats.append(extract_features(backbone, aug_pipeline(img)))
                 all_labels.append(lbl)
                 bar.update(1)
+            del img
+            if len(all_labels) % 200 == 0:
+                print(f"  [build] {len(all_labels)}/{n_total} features", flush=True)
 
     clf = LogisticRegression(max_iter=200, C=cfg.reg_C, solver="saga",
                              n_jobs=-1, class_weight="balanced")

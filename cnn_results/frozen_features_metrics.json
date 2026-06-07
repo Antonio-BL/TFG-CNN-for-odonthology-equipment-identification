@@ -1,0 +1,98 @@
+{
+  "mean_accuracy": 0.8518524332810047,
+  "std_accuracy": 0.02048606072863816,
+  "fold_accuracies": [
+    0.8622448979591837,
+    0.8775510204081632,
+    0.8520408163265306,
+    0.8520408163265306,
+    0.8153846153846154
+  ],
+  "classification_report": {
+    "Herramienta0": {
+      "precision": 0.8588235294117647,
+      "recall": 0.9012345679012346,
+      "f1-score": 0.8795180722891566,
+      "support": 81.0
+    },
+    "Herramienta1": {
+      "precision": 0.8686868686868687,
+      "recall": 0.86,
+      "f1-score": 0.864321608040201,
+      "support": 100.0
+    },
+    "Herramienta2": {
+      "precision": 0.8877551020408163,
+      "recall": 0.8787878787878788,
+      "f1-score": 0.883248730964467,
+      "support": 99.0
+    },
+    "Herramienta3": {
+      "precision": 0.896551724137931,
+      "recall": 0.78,
+      "f1-score": 0.8342245989304813,
+      "support": 100.0
+    },
+    "Herramienta4": {
+      "precision": 0.7027027027027027,
+      "recall": 0.78,
+      "f1-score": 0.7393364928909952,
+      "support": 100.0
+    },
+    "Herramienta5": {
+      "precision": 0.8380952380952381,
+      "recall": 0.8888888888888888,
+      "f1-score": 0.8627450980392157,
+      "support": 99.0
+    },
+    "Herramienta6": {
+      "precision": 0.7631578947368421,
+      "recall": 0.87,
+      "f1-score": 0.8130841121495327,
+      "support": 100.0
+    },
+    "Herramienta7": {
+      "precision": 0.9693877551020408,
+      "recall": 0.95,
+      "f1-score": 0.9595959595959596,
+      "support": 100.0
+    },
+    "Herramienta8": {
+      "precision": 0.9130434782608695,
+      "recall": 0.84,
+      "f1-score": 0.875,
+      "support": 100.0
+    },
+    "Herramienta9": {
+      "precision": 0.8666666666666667,
+      "recall": 0.78,
+      "f1-score": 0.8210526315789474,
+      "support": 100.0
+    },
+    "accuracy": 0.8518896833503575,
+    "macro avg": {
+      "precision": 0.8564870959841739,
+      "recall": 0.8528911335578002,
+      "f1-score": 0.8532127304478957,
+      "support": 979.0
+    },
+    "weighted avg": {
+      "precision": 0.8564285991677371,
+      "recall": 0.8518896833503575,
+      "f1-score": 0.8526617908533177,
+      "support": 979.0
+    }
+  },
+  "class_names": [
+    "Herramienta0",
+    "Herramienta1",
+    "Herramienta2",
+    "Herramienta3",
+    "Herramienta4",
+    "Herramienta5",
+    "Herramienta6",
+    "Herramienta7",
+    "Herramienta8",
+    "Herramienta9"
+  ]
+}

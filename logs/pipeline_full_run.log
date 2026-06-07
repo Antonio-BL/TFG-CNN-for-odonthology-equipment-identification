@@ -1,0 +1,292 @@
+[pipeline] Building classifier (runs once)…
+Loading classifier from cache: cnn_results/classifier.joblib
+Processing 20 image(s)…
+
+[pipeline] ./Trays/IMG_3344.jpg
+  Scenario     : none
+  Initial bboxes : 6  (0 flagged as fused)
+  Final count    : 6 instrument(s)
+    #1  centre=(378.0, 1493.5)  size=1889.0×320.0  angle=-90.0°  area=341,115 px
+    #2  centre=(3203.3, 1362.8)  size=492.3×1096.3  angle=-16.9°  area=182,233 px
+    #3  centre=(955.0, 1310.5)  size=2135.0×292.0  angle=-90.0°  area=173,532 px
+    #4  centre=(2743.1, 1390.0)  size=147.1×1464.8  angle=-3.5°  area=168,813 px
+    #5  centre=(2149.5, 1266.4)  size=118.2×2185.4  angle=-2.2°  area=132,891 px
+    #6  centre=(1544.8, 1386.9)  size=115.5×2000.4  angle=-1.5°  area=127,179 px
+  Concave pts  : 0 candidate(s) across 0 outlier bbox(es)
+  Classifications: Botador (78%), Tijeras (72%), Espejo (59%), Bisturi (57%), Sonda (27%), Cureta (62%)
+
+[pipeline] ./Trays/IMG_3345.jpg
+  Scenario     : none
+  Initial bboxes : 6  (0 flagged as fused)
+  Final count    : 6 instrument(s)
+    #1  centre=(944.9, 2583.9)  size=345.3×1863.6  angle=-30.8°  area=364,113 px
+    #2  centre=(1413.4, 2108.3)  size=288.5×2084.0  angle=-34.3°  area=172,228 px
+    #3  centre=(3221.6, 1153.5)  size=432.8×997.0  angle=-48.5°  area=150,540 px
+    #4  centre=(2876.7, 1377.1)  size=141.6×1351.8  angle=-35.2°  area=148,860 px
+    #5  centre=(2331.0, 1560.2)  size=118.4×2033.2  angle=-36.0°  area=121,501 px
+    #6  centre=(1906.6, 1930.4)  size=116.4×1864.6  angle=-32.4°  area=120,338 px
+  Concave pts  : 0 candidate(s) across 0 outlier bbox(es)
+  Classifications: Botador (73%), Espejo (71%), Tijeras (77%), Bisturi (56%), Porta agujas (25%), Cureta (36%)
+
+[pipeline] ./Trays/IMG_3347.jpg
+  Scenario     : single
+  Initial bboxes : 5  (1 flagged as fused)
+  Final count    : 6 instrument(s)
+    #1  centre=(584.6, 1301.4)  size=1751.8×288.2  angle=-73.5°  area=287,259 px
+    #2  centre=(3318.8, 1752.2)  size=531.4×1125.3  angle=-6.6°  area=205,045 px
+    #3  centre=(2839.9, 1680.4)  size=1475.3×163.3  angle=-80.9°  area=180,289 px
+    #4  centre=(1105.0, 1251.1)  size=1994.4×213.7  angle=-81.6°  area=142,897 px
+    #5  centre=(2275.3, 1393.5)  size=2013.9×116.2  angle=-50.7°  area=129,439 px
+    #6  centre=(1782.9, 1326.9)  size=1685.6×103.2  angle=-77.7°  area=113,153 px
+  Concave pts  : 2 candidate(s) across 1 outlier bbox(es)
+    bbox    #       x       y       κ  roi_len    chord   grade  best
+    ─────────────────────────────────────────────────────────────────
+       0    0    1609    2155   2.738       12    261.7   1.000  ★
+       0    1    1552    2319   2.606       12     99.4   0.000   
+  Classifications: Botador (72%), Tijeras (76%), Bisturi (43%), Espejo (27%), Porta agujas (22%), Cureta (37%)
+
+[pipeline] ./Trays/IMG_3348.jpg
+  Scenario     : single
+  Initial bboxes : 5  (1 flagged as fused)
+  Final count    : 6 instrument(s)
+    #1  centre=(437.6, 1263.0)  size=1685.9×299.0  angle=-80.5°  area=282,114 px
+    #2  centre=(3104.4, 1217.0)  size=481.0×1011.1  angle=-17.9°  area=170,013 px
+    #3  centre=(2665.0, 1234.3)  size=149.2×1340.5  angle=-1.6°  area=154,461 px
+    #4  centre=(944.2, 1129.7)  size=217.9×1906.6  angle=-0.6°  area=140,746 px
+    #5  centre=(2090.6, 1105.6)  size=1897.1×124.1  angle=-62.7°  area=114,966 px
+    #6  centre=(1645.9, 1108.1)  size=1639.0×100.6  angle=-87.4°  area=106,310 px
+  Concave pts  : 1 candidate(s) across 1 outlier bbox(es)
+    bbox    #       x       y       κ  roi_len    chord   grade  best
+    ─────────────────────────────────────────────────────────────────
+       0    0    1614    1931   2.809       10    219.6   1.000  ★
+  Classifications: Botador (76%), Tijeras (78%), Bisturi (61%), Espejo (29%), Porta agujas (23%), Sonda (45%)
+
+[pipeline] ./Trays/IMG_3349.jpg
+  Scenario     : none
+  Initial bboxes : 6  (0 flagged as fused)
+  Final count    : 6 instrument(s)
+    #1  centre=(388.6, 1414.3)  size=313.2×1686.2  angle=-9.0°  area=297,730 px
+    #2  centre=(1582.1, 1216.0)  size=358.9×1914.3  angle=-1.8°  area=254,007 px
+    #3  centre=(3163.9, 1235.0)  size=472.6×1014.0  angle=-22.2°  area=168,118 px
+    #4  centre=(2706.5, 1272.3)  size=150.0×1349.6  angle=-8.0°  area=157,376 px
+    #5  centre=(955.5, 1238.7)  size=234.5×1957.2  angle=-6.1°  area=148,005 px
+    #6  centre=(2327.3, 1246.8)  size=127.1×1884.8  angle=-0.6°  area=114,817 px
+  Concave pts  : 0 candidate(s) across 0 outlier bbox(es)
+  Classifications: Botador (74%), Forceps sup. (80%), Tijeras (59%), Bisturi (66%), Espejo (25%), Forceps sup. (23%)
+
+[pipeline] ./Trays/IMG_3350.jpg
+  Scenario     : none
+  Initial bboxes : 6  (0 flagged as fused)
+  Final count    : 6 instrument(s)
+    #1  centre=(467.0, 1457.4)  size=337.2×1787.9  angle=-4.1°  area=334,469 px
+    #2  centre=(1702.5, 1271.0)  size=2042.0×383.0  angle=-90.0°  area=291,888 px
+    #3  centre=(3378.7, 1306.6)  size=504.2×1084.0  angle=-21.3°  area=191,480 px
+    #4  centre=(2899.1, 1339.3)  size=157.9×1444.8  angle=-6.1°  area=178,033 px
+    #5  centre=(1047.2, 1284.7)  size=240.2×2070.2  angle=-3.8°  area=160,782 px
+    #6  centre=(2308.6, 1340.7)  size=2143.0×126.1  angle=-62.7°  area=132,802 px
+  Concave pts  : 0 candidate(s) across 0 outlier bbox(es)
+  Classifications: Botador (77%), Forceps sup. (84%), Tijeras (67%), Bisturi (63%), Espejo (27%), Sonda (28%)
+
+[pipeline] ./Trays/IMG_3351.jpg
+  Scenario     : none
+  Initial bboxes : 6  (0 flagged as fused)
+  Final count    : 6 instrument(s)
+    #1  centre=(449.3, 1432.0)  size=1722.6×334.1  angle=-79.4°  area=323,639 px
+    #2  centre=(1753.0, 1335.5)  size=1695.0×306.0  angle=-90.0°  area=277,190 px
+    #3  centre=(2686.0, 1309.0)  size=1343.1×150.6  angle=-86.6°  area=157,415 px
+    #4  centre=(953.6, 1275.9)  size=232.4×1957.9  angle=-5.1°  area=146,718 px
+    #5  centre=(3127.0, 1326.6)  size=753.4×986.6  angle=-11.1°  area=146,194 px
+    #6  centre=(2185.3, 1303.3)  size=124.8×2014.2  angle=-6.0°  area=117,928 px
+  Concave pts  : 0 candidate(s) across 0 outlier bbox(es)
+  Classifications: Forceps sup. (40%), Botador (78%), Bisturi (63%), Botador (24%), Tijeras (59%), Sonda (18%)
+
+[pipeline] ./Trays/IMG_3353.jpg
+  Scenario     : single
+  Initial bboxes : 5  (1 flagged as fused)
+  Final count    : 6 instrument(s)
+    #1  centre=(1773.6, 1307.6)  size=305.7×1679.3  angle=-0.6°  area=291,162 px
+    #2  centre=(478.2, 1390.7)  size=1713.2×329.5  angle=-77.0°  area=162,403 px
+    #3  centre=(1201.2, 1184.9)  size=1362.5×146.2  angle=-66.3°  area=154,378 px
+    #4  centre=(2549.8, 1242.8)  size=1867.3×246.6  angle=-84.8°  area=148,068 px
+    #5  centre=(3139.6, 1314.6)  size=743.2×989.0  angle=-9.3°  area=145,720 px
+    #6  centre=(2195.4, 1227.1)  size=124.7×1889.9  angle=-4.8°  area=112,785 px
+  Concave pts  : 3 candidate(s) across 1 outlier bbox(es)
+    bbox    #       x       y       κ  roi_len    chord   grade  best
+    ─────────────────────────────────────────────────────────────────
+       0    0    2321    2273   2.660       10    290.9   0.741   
+       0    1    2634     587   1.015        8    510.4   0.200   
+       0    2    2349    2166   2.880       11    308.3   0.795  ★
+  Classifications: Botador (73%), Porta agujas (43%), Bisturi (61%), Espejo (26%), Tijeras (62%), Porta agujas (22%)
+
+[pipeline] ./Trays/IMG_3354.jpg
+  Scenario     : none
+  Initial bboxes : 6  (0 flagged as fused)
+  Final count    : 6 instrument(s)
+    #1  centre=(439.6, 1489.7)  size=1763.9×345.5  angle=-79.6°  area=337,163 px
+    #2  centre=(1728.7, 1377.1)  size=319.2×1728.4  angle=-8.0°  area=294,854 px
+    #3  centre=(1143.1, 1314.2)  size=283.8×2016.5  angle=-17.1°  area=168,743 px
+    #4  centre=(2612.3, 1379.0)  size=151.8×1368.7  angle=-1.1°  area=160,437 px
+    #5  centre=(3212.6, 1355.5)  size=631.4×1051.9  angle=-15.5°  area=145,861 px
+    #6  centre=(2210.2, 1328.6)  size=126.1×2049.2  angle=-7.0°  area=122,300 px
+  Concave pts  : 0 candidate(s) across 0 outlier bbox(es)
+  Classifications: Porta agujas (52%), Botador (87%), Espejo (55%), Bisturi (56%), Tijeras (61%), Cureta (21%)
+
+[pipeline] ./Trays/IMG_3355.jpg
+  Scenario     : single
+  Initial bboxes : 5  (1 flagged as fused)
+  Final count    : 6 instrument(s)
+    #1  centre=(1957.6, 1206.9)  size=1747.2×334.6  angle=-72.6°  area=336,578 px
+    #2  centre=(2637.4, 1423.3)  size=484.1×1842.4  angle=-21.3°  area=198,240 px
+    #3  centre=(1077.7, 1000.4)  size=993.3×706.6  angle=-87.2°  area=194,988 px
+    #4  centre=(572.4, 1145.6)  size=2041.5×227.4  angle=-87.8°  area=159,491 px
+    #5  centre=(3394.7, 1269.0)  size=116.9×2098.8  angle=-5.8°  area=130,583 px
+    #6  centre=(2953.1, 1154.0)  size=1072.7×146.9  angle=-86.5°  area=120,789 px
+  Concave pts  : 1 candidate(s) across 1 outlier bbox(es)
+    bbox    #       x       y       κ  roi_len    chord   grade  best
+    ─────────────────────────────────────────────────────────────────
+       0    0    2824    1693   2.582       10    238.8   1.000  ★
+  Classifications: Botador (77%), Porta agujas (35%), Tijeras (42%), Espejo (20%), Botador (22%), Bisturi (35%)
+
+[pipeline] ./Trays/IMG_3356.jpg
+  Scenario     : none
+  Initial bboxes : 6  (0 flagged as fused)
+  Final count    : 6 instrument(s)
+    #1  centre=(2078.7, 1215.4)  size=1764.8×341.6  angle=-74.4°  area=347,546 px
+    #2  centre=(2586.5, 1269.3)  size=1777.1×351.2  angle=-86.7°  area=343,877 px
+    #3  centre=(1169.3, 1019.0)  size=1010.0×719.9  angle=-88.7°  area=202,050 px
+    #4  centre=(3072.3, 1309.6)  size=1421.1×159.5  angle=-88.2°  area=176,473 px
+    #5  centre=(655.2, 1176.7)  size=2083.3×236.2  angle=-89.8°  area=166,408 px
+    #6  centre=(3523.3, 1248.0)  size=113.2×2130.3  angle=-9.2°  area=134,717 px
+  Concave pts  : 0 candidate(s) across 0 outlier bbox(es)
+  Classifications: Botador (74%), Porta agujas (45%), Tijeras (49%), Bisturi (58%), Forceps sup. (24%), Sonda (20%)
+
+[pipeline] ./Trays/IMG_3357.jpg
+  Scenario     : none
+  Initial bboxes : 6  (0 flagged as fused)
+  Final count    : 6 instrument(s)
+    #1  centre=(2641.5, 1405.5)  size=1815.6×360.3  angle=-81.5°  area=359,131 px
+    #2  centre=(1195.5, 1036.8)  size=1028.6×716.3  angle=-81.4°  area=203,855 px
+    #3  centre=(3138.2, 1482.1)  size=1466.8×164.0  angle=-83.2°  area=187,372 px
+    #4  centre=(701.3, 1186.6)  size=2096.7×233.2  angle=-86.2°  area=166,079 px
+    #5  centre=(3616.1, 1446.7)  size=113.6×2214.2  angle=-5.3°  area=140,798 px
+    #6  centre=(1915.5, 1290.0)  size=2119.7×197.4  angle=-89.9°  area=134,451 px
+  Concave pts  : 0 candidate(s) across 0 outlier bbox(es)
+  Classifications: Porta agujas (39%), Tijeras (53%), Bisturi (65%), Porta agujas (22%), Sonda (25%), Cureta (65%)
+
+[pipeline] ./Trays/IMG_3359.jpg
+  Scenario     : none
+  Initial bboxes : 6  (0 flagged as fused)
+  Final count    : 6 instrument(s)
+    #1  centre=(1016.5, 1072.1)  size=1113.5×786.8  angle=-83.6°  area=239,562 px
+    #2  centre=(3107.9, 1459.6)  size=177.9×1605.5  angle=-4.8°  area=220,706 px
+    #3  centre=(480.7, 1271.1)  size=2289.6×249.9  angle=-86.6°  area=197,898 px
+    #4  centre=(3684.8, 1433.9)  size=121.1×2402.6  angle=-9.6°  area=163,965 px
+    #5  centre=(1818.1, 1268.2)  size=193.1×2171.9  angle=-1.0°  area=154,462 px
+    #6  centre=(2320.1, 1339.7)  size=307.5×2138.3  angle=-5.6°  area=134,552 px
+  Concave pts  : 0 candidate(s) across 0 outlier bbox(es)
+  Classifications: Tijeras (48%), Bisturi (60%), Forceps sup. (28%), Sonda (30%), Cureta (50%), Forceps sup. (60%)
+
+[pipeline] ./Trays/IMG_3360.jpg
+  Scenario     : none
+  Initial bboxes : 6  (0 flagged as fused)
+  Final count    : 6 instrument(s)
+    #1  centre=(1079.2, 1127.7)  size=983.1×619.4  angle=-75.4°  area=162,679 px
+    #2  centre=(448.5, 1225.4)  size=1362.4×137.0  angle=-70.8°  area=149,646 px
+    #3  centre=(2537.7, 1156.3)  size=1899.3×219.9  angle=-82.0°  area=137,114 px
+    #4  centre=(3252.8, 1220.2)  size=107.8×1980.4  angle=-9.6°  area=115,109 px
+    #5  centre=(1733.9, 1143.6)  size=187.7×1902.1  angle=-1.1°  area=112,995 px
+    #6  centre=(2122.0, 1103.3)  size=1779.3×221.8  angle=-88.8°  area=99,932 px
+  Concave pts  : 0 candidate(s) across 0 outlier bbox(es)
+  Classifications: Tijeras (47%), Bisturi (55%), Botador (24%), Botador (20%), Cureta (62%), Forceps sup. (56%)
+
+[pipeline] ./Trays/IMG_3361.jpg
+  Scenario     : none
+  Initial bboxes : 6  (0 flagged as fused)
+  Final count    : 6 instrument(s)
+    #1  centre=(1140.5, 1315.2)  size=684.0×1110.8  angle=-2.5°  area=198,982 px
+    #2  centre=(371.7, 1509.7)  size=1534.4×153.3  angle=-76.8°  area=188,508 px
+    #3  centre=(2634.1, 1270.0)  size=2066.5×222.2  angle=-86.8°  area=147,882 px
+    #4  centre=(1778.4, 1249.0)  size=174.5×2015.5  angle=-5.6°  area=130,700 px
+    #5  centre=(2226.8, 1331.4)  size=112.8×2158.2  angle=-3.1°  area=130,210 px
+    #6  centre=(3220.9, 1116.3)  size=271.5×1916.9  angle=-13.2°  area=116,343 px
+  Concave pts  : 0 candidate(s) across 0 outlier bbox(es)
+  Classifications: Tijeras (41%), Bisturi (58%), Espejo (24%), Cureta (63%), Sonda (22%), Forceps sup. (25%)
+
+[pipeline] ./Trays/IMG_3365.jpg
+  Scenario     : none
+  Initial bboxes : 6  (0 flagged as fused)
+  Final count    : 6 instrument(s)
+    #1  centre=(940.2, 1278.8)  size=992.1×620.5  angle=-81.4°  area=163,506 px
+    #2  centre=(1842.2, 1096.5)  size=141.0×1274.8  angle=-10.6°  area=138,773 px
+    #3  centre=(347.4, 1293.7)  size=1857.6×239.6  angle=-86.7°  area=117,282 px
+    #4  centre=(2065.1, 1237.7)  size=121.0×1946.3  angle=-5.4°  area=114,782 px
+    #5  centre=(1598.5, 1172.0)  size=155.7×1807.5  angle=-8.4°  area=111,373 px
+    #6  centre=(2922.0, 1011.5)  size=257.0×1742.8  angle=-18.5°  area=99,196 px
+  Concave pts  : 0 candidate(s) across 0 outlier bbox(es)
+  Classifications: Tijeras (50%), Bisturi (73%), Espejo (39%), Sonda (21%), Cureta (57%), Forceps sup. (30%)
+
+[pipeline] ./Trays/IMG_3368.jpg
+  Scenario     : none
+  Initial bboxes : 5  (0 flagged as fused)
+  Final count    : 5 instrument(s)
+    #1  centre=(2064.4, 1158.2)  size=228.8×1457.0  angle=-5.9°  area=183,937 px
+    #2  centre=(963.7, 1046.1)  size=882.4×541.7  angle=-89.6°  area=130,285 px
+    #3  centre=(376.6, 999.9)  size=1660.5×234.3  angle=-81.6°  area=104,236 px
+    #4  centre=(2368.1, 1061.3)  size=116.1×1112.6  angle=-9.3°  area=101,206 px
+    #5  centre=(1658.5, 1152.6)  size=222.8×1580.4  angle=-8.9°  area=81,864 px
+  Concave pts  : 0 candidate(s) across 0 outlier bbox(es)
+  Classifications: Botador (77%), Tijeras (53%), Espejo (40%), Bisturi (67%), Forceps sup. (29%)
+
+[pipeline] ./Trays/IMG_3373.jpg
+  Scenario     : none
+  Initial bboxes : 8  (0 flagged as fused)
+  Final count    : 8 instrument(s)
+    #1  centre=(1069.3, 1059.3)  size=357.4×1896.2  angle=-1.4°  area=268,867 px
+    #2  centre=(2510.5, 1608.8)  size=460.9×1101.4  angle=-12.4°  area=164,837 px
+    #3  centre=(665.0, 1326.6)  size=1434.7×146.9  angle=-68.5°  area=162,927 px
+    #4  centre=(376.2, 1042.4)  size=1879.8×253.3  angle=-80.0°  area=124,920 px
+    #5  centre=(2816.8, 1203.6)  size=195.8×1973.6  angle=-12.9°  area=118,221 px
+    #6  centre=(1965.9, 1015.3)  size=1653.4×282.9  angle=-88.9°  area=117,610 px
+    #7  centre=(1573.3, 1243.8)  size=126.7×1833.6  angle=-10.6°  area=110,284 px
+    #8  centre=(3100.0, 1132.7)  size=1813.6×232.5  angle=-89.2°  area=101,066 px
+  Concave pts  : 0 candidate(s) across 0 outlier bbox(es)
+  Classifications: Forceps sup. (85%), Tijeras (54%), Bisturi (75%), Espejo (62%), Cureta (49%), Porta agujas (61%), Cureta (51%), Forceps sup. (40%)
+
+[pipeline] ./Trays/IMG_3374.jpg
+  Scenario     : none
+  Initial bboxes : 8  (0 flagged as fused)
+  Final count    : 8 instrument(s)
+    #1  centre=(1186.8, 1521.4)  size=2385.4×457.2  angle=-89.5°  area=398,528 px
+    #2  centre=(2228.9, 1632.3)  size=1905.3×320.0  angle=-86.4°  area=345,594 px
+    #3  centre=(591.4, 1806.8)  size=1829.0×206.1  angle=-64.1°  area=282,269 px
+    #4  centre=(216.7, 1389.4)  size=2434.9×360.2  angle=-76.3°  area=224,491 px
+    #5  centre=(2779.1, 2376.8)  size=477.0×1267.3  angle=-9.5°  area=200,956 px
+    #6  centre=(1766.4, 1722.2)  size=128.9×2119.2  angle=-9.5°  area=158,310 px
+    #7  centre=(3114.3, 1948.5)  size=204.8×2212.3  angle=-9.6°  area=141,710 px
+    #8  centre=(3385.3, 1922.9)  size=1977.1×250.0  angle=-87.3°  area=117,756 px
+  Concave pts  : 0 candidate(s) across 0 outlier bbox(es)
+  Classifications: Forceps sup. (77%), Porta agujas (64%), Bisturi (55%), Espejo (76%), Tijeras (54%), Periostotomo (29%), Cureta (46%), Pinzas (24%)
+
+[pipeline] ./Trays/IMG_3376.jpg
+  Scenario     : single
+  Initial bboxes : 7  (1 flagged as fused)
+  Final count    : 7 instrument(s)
+    #1  centre=(2488.4, 1166.9)  size=349.8×1939.4  angle=-5.4°  area=256,194 px
+    #2  centre=(1841.8, 1036.4)  size=1545.6×789.2  angle=-89.5°  area=219,020 px
+    #3  centre=(659.5, 1351.8)  size=1448.7×149.8  angle=-69.5°  area=167,358 px
+    #4  centre=(1090.8, 1211.0)  size=1056.3×463.3  angle=-66.4°  area=162,897 px
+    #5  centre=(381.4, 1057.6)  size=1919.8×259.6  angle=-79.7°  area=133,330 px
+    #6  centre=(2928.3, 1118.5)  size=171.5×1707.9  angle=-10.7°  area=105,877 px
+    #7  centre=(3185.6, 1218.0)  size=1856.5×231.4  angle=-89.3°  area=103,344 px
+  Concave pts  : 7 candidate(s) across 1 outlier bbox(es)
+    bbox    #       x       y       κ  roi_len    chord   grade  best
+    ─────────────────────────────────────────────────────────────────
+       0    0    1665    1763   2.497        9     74.1   0.636   
+       0    1    1693    1811   2.993        9    219.5   0.932  ★
+       0    2    2045    1021   1.486        6    166.0   0.126   
+       0    3    1793    1545   2.723       10     93.6   0.717   
+       0    4    2184     347   2.122       10    166.6   0.405   
+       0    5    2226     524   2.818        9    101.0   0.764   
+       0    6    2190     289   1.993       11    160.8   0.400   
+  Classifications: Forceps sup. (82%), Porta agujas (74%), Bisturi (70%), Tijeras (58%), Espejo (56%), Cureta (47%), Forceps sup. (27%)
+BATCH_DONE images=20 PEAK_RSS_MB=2060

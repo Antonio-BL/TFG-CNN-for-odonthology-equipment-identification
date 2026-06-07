@@ -1,0 +1,16 @@
+============================================================
+  Building pipeline crops: Tools -> pipeline_crops
+  Classes: 10   image_dims: (4284, 5712)
+============================================================
+  Herramienta0      ok=  30  fail= 70
+  Herramienta1      ok= 100  fail=  0
+  Herramienta2      ok=  99  fail=  1
+  Herramienta3      ok= 100  fail=  0
+  Herramienta4      ok= 100  fail=  0
+  Herramienta5      ok=  99  fail=  1
+  Herramienta6      ok= 100  fail=  0
+  Herramienta7      ok= 100  fail=  0
+  Herramienta8      ok= 100  fail=  0
+  Herramienta9      ok= 100  fail=  0
+
+  Total: 928 crops saved, 72 failed in 78.1 min

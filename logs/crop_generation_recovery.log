@@ -1,0 +1,32 @@
+============================================================
+  Building pipeline crops: Tools -> pipeline_crops
+  Classes: 10   image_dims: (4284, 5712)
+============================================================
+    [fail] IMG_0354.jpg: No ROI background region detected.
+    [fail] IMG_0356.jpg: No ROI component large enough.
+    [fail] IMG_0367.jpg: No ROI component large enough.
+    [fail] IMG_0370.jpg: No ROI component large enough.
+    [fail] IMG_0377.jpg: No ROI background region detected.
+    [fail] IMG_0378.jpg: No ROI background region detected.
+    [fail] IMG_0381.jpg: No ROI background region detected.
+    [fail] IMG_0382.jpg: No ROI background region detected.
+    [fail] IMG_0389.jpg: No ROI component large enough.
+    [fail] IMG_0392.jpg: No ROI component large enough.
+    [fail] IMG_0411.jpg: No ROI component large enough.
+    [fail] IMG_0412.jpg: No ROI component large enough.
+    [fail] IMG_0413.jpg: No ROI component large enough.
+    [fail] IMG_0415.jpg: No ROI background region detected.
+    [fail] IMG_0419.jpg: No ROI background region detected.
+    [fail] IMG_0424.jpg: No ROI component large enough.
+  Herramienta0      ok=  81  fail= 19
+  Herramienta1      ok= 100  fail=  0
+  Herramienta2      ok=  99  fail=  1
+  Herramienta3      ok= 100  fail=  0
+  Herramienta4      ok= 100  fail=  0
+  Herramienta5      ok=  99  fail=  1
+  Herramienta6      ok= 100  fail=  0
+  Herramienta7      ok= 100  fail=  0
+  Herramienta8      ok= 100  fail=  0
+  Herramienta9      ok= 100  fail=  0
+
+  Total: 979 crops saved, 21 failed in 4.5 min

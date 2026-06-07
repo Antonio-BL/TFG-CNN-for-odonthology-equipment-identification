@@ -31,5 +31,5 @@ class ClassifierConfig:
     finetune_batch_size: int = 16
 
     # ── I/O ───────────────────────────────────────────────────────────────────
-    data_dir: str = "./Tools"
+    data_dir: str = "./pipeline_crops"
     results_dir: str = "./cnn_results"
