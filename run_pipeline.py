@@ -261,7 +261,7 @@ def main(
         print('[pipeline] Headless: showing no windows; '
               'overview figures skipped, classification PNGs still saved.')
 
-    classifier = True
+    classifier = None
     class_names = None
     if classify:
         print('[pipeline] Building classifier (runs once)…')
