@@ -17,8 +17,22 @@
 import os
 os.environ.setdefault('KMP_DUPLICATE_LIB_OK', 'TRUE')
 
+import gc
+
 import numpy as np
 import cv2 as cv
+
+
+def _is_headless() -> bool:
+    """True when no GUI display is usable (SSH/cron, or a forced Agg backend).
+
+    run_pipeline_headless.py forces MPLBACKEND=Agg before import, so treat any
+    non-interactive backend as headless even if DISPLAY happens to be set.
+    """
+    backend = os.environ.get('MPLBACKEND', '').lower()
+    if backend in ('agg', 'pdf', 'ps', 'svg', 'template'):
+        return True
+    return not (os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY'))
 
 from config                  import PreprocessConfig
 from pipeline.preprocess     import (
@@ -66,6 +80,7 @@ def _process_image(
     debugging: bool = False,
     classifier: ToolClassifier | None = None,
     class_names: list[str] | None = None,
+    show_figs: bool = True,
 ) -> tuple:
     """Run the full pipeline on a single image and optionally display results.
 
@@ -183,6 +198,17 @@ def _process_image(
               + ', '.join(f'{n} ({c:.0%})' for n, c in zip(pred_labels, confidences)))
 
     # ── Visualisation ────────────────────────────────────────────────────────
+    # The classification PNG is saved whenever a classifier ran (works headless
+    # under the Agg backend); the multi-panel overview is only useful on a real
+    # display, so it stays gated behind `debugging`.  `show_figs` lets callers
+    # build/save figures without popping windows (set False when headless).
+    if classifier is not None:
+        plot_pipeline_result(
+            tray_masked, final_bboxes, crops, pred_labels, confidences,
+            image_label=image_label,
+            save_path=f'./pipeline_results/{image_label}_result.png',
+            show=show_figs,
+        )
     if debugging:
         plot_segmentation_results(
             tray_masked, tray_no_bg, seg_binary, bboxes,
@@ -195,13 +221,8 @@ def _process_image(
             concave_points=concave_pts  if outlier_bboxes else None,
             seg_binary_cut=seg_binary_cut if outlier_bboxes else None,
             final_bboxes=final_bboxes   if outlier_bboxes else None,
+            show=show_figs,
         )
-        if classifier is not None:
-            plot_pipeline_result(
-                tray_masked, final_bboxes, crops, pred_labels, confidences,
-                image_label=image_label,
-                save_path=f'./pipeline_results/{image_label}_result.png',
-            )
 
     return (tray_no_bg, seg_binary, seg_binary_cut, final_bboxes,
             outlier_analysis, concave_pts, crops, pred_labels, confidences)
@@ -223,21 +244,36 @@ def main(
                      returned tuple(s) and a figure is saved to ./pipeline_results/.
 
     Returns:
-        Single 9-tuple from _process_image, or a list of them when image_path='all'.
+        Single 9-tuple from _process_image for a single image.  For
+        image_path='all' a list of lightweight per-image summary dicts
+        ({'path', 'n_final', 'scenario'}) is returned instead of the full
+        tuples: retaining every image's full-resolution arrays for the whole
+        dataset is what previously exhausted RAM and triggered the OOM killer.
     """
     cfg = PreprocessConfig()
 
-    classifier = None
+    # Headless (no display): never pop GUI windows.  The Agg backend + figure
+    # saving still run, so classification PNGs are produced; only on-screen
+    # display is suppressed.
+    headless  = _is_headless()
+    show_figs = not headless
+    if headless and debugging:
+        print('[pipeline] Headless: showing no windows; '
+              'overview figures skipped, classification PNGs still saved.')
+
+    classifier = True
     class_names = None
     if classify:
         print('[pipeline] Building classifier (runs once)…')
         classifier = build_classifier(ClassifierConfig())
+        # ['Herramienta0'..'Herramienta9'] → Botador, Forceps sup., Cureta,
+        # Espejo, Pinzas, Sonda, Periostotomo, Bisturi, Porta agujas, Tijeras
         class_names = classifier.class_names
 
     def _collect_paths() -> list[str]:
         paths = sorted(
             os.path.join(wd, f)
-            for wd, _, files in os.walk('./Trays')
+            for wd, _, files in os.walk('./Trays3')
             for f in files
             if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))
         )
@@ -247,17 +283,30 @@ def main(
 
     if image_path == 'all':
         all_paths = _collect_paths()
+        # On-screen overview windows per image would block the batch and leak
+        # GUI resources; the saved PNGs carry the same info.  Suppress them.
+        overview = debugging and not headless
         print(f'Processing {len(all_paths)} image(s)…')
-        results = []
+        summaries = []
         for path in all_paths:
             try:
-                results.append(_process_image(
-                    path, cfg, debugging=debugging,
+                result = _process_image(
+                    path, cfg, debugging=overview,
                     classifier=classifier, class_names=class_names,
-                ))
+                    show_figs=show_figs,
+                )
+                # Keep only a tiny summary — drop the heavy per-image arrays so
+                # they can be reclaimed instead of piling up across the dataset.
+                summaries.append({
+                    'path':     path,
+                    'n_final':  len(result[3]),
+                    'scenario': result[4]['scenario'],
+                })
+                del result
             except Exception as exc:
                 print(f'  [error] {path}: {exc}')
-        return results
+            gc.collect()
+        return summaries
 
     if image_path is None:
         all_paths  = _collect_paths()
@@ -266,6 +315,7 @@ def main(
     return _process_image(
         image_path, cfg, debugging=debugging,
         classifier=classifier, class_names=class_names,
+        show_figs=show_figs,
     )
 
 

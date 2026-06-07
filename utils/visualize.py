@@ -15,8 +15,19 @@ import pathlib
 import numpy as np
 import cv2 as cv
 import matplotlib
-_forced = os.environ.get('MPLBACKEND')
-_candidates = ([_forced] if _forced else []) + ['Qt5Agg', 'TkAgg', 'Agg']
+# Backend selection.  Honour an explicit MPLBACKEND override first; otherwise,
+# when running headless (no X11/Wayland display) fall straight to the
+# non-interactive Agg backend.  Selecting an interactive backend without a
+# display lets plt.show() spawn/retain GUI resources that never get freed in a
+# batch loop, which is a slow memory leak that ends in an OOM kill.
+_forced   = os.environ.get('MPLBACKEND')
+_headless = not (os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY'))
+if _forced:
+    _candidates = [_forced]
+elif _headless:
+    _candidates = ['Agg']
+else:
+    _candidates = ['Qt5Agg', 'TkAgg', 'Agg']
 for _backend in _candidates:
     try:
         matplotlib.use(_backend)
@@ -24,6 +35,10 @@ for _backend in _candidates:
         break
     except Exception:
         continue
+
+# True only for backends that can actually display a window.  Used to skip
+# plt.show() (a no-op warning under Agg) when running headless.
+_INTERACTIVE = matplotlib.get_backend().lower() not in ('agg', 'pdf', 'ps', 'svg', 'template')
 import matplotlib.patches as mpatches
 import matplotlib.lines   as mlines
 import matplotlib.gridspec as gridspec
@@ -52,6 +67,7 @@ def plot_segmentation_results(
     concave_points: dict | None = None,
     seg_binary_cut: np.ndarray | None = None,
     final_bboxes: list[tuple] | None = None,
+    show: bool = True,
 ) -> None:
     """Show a 2×3 overview figure for one image's segmentation result.
 
@@ -361,8 +377,9 @@ def plot_segmentation_results(
     )
 
     plt.tight_layout(rect=[0, 0, 1, 0.96])
-    plt.show()
-    plt.close()
+    if show and _INTERACTIVE:
+        plt.show()
+    plt.close(fig)
 
 
 def plot_pipeline_result(
@@ -374,6 +391,7 @@ def plot_pipeline_result(
     image_label: str | None = None,
     save_path: str | None = None,
     warn_threshold: float = 0.6,
+    show: bool = True,
 ) -> None:
     """2-panel figure: annotated tray image (left) + deskewed crop gallery (right).
 
@@ -443,5 +461,6 @@ def plot_pipeline_result(
         pathlib.Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
 
-    plt.show()
-    plt.close()
+    if show and _INTERACTIVE:
+        plt.show()
+    plt.close(fig)
