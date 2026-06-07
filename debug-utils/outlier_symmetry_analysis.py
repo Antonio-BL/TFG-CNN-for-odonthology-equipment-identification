@@ -10,20 +10,25 @@
 # What it does, per outlier candidate:
 #   1. Split the outlier's oriented bbox in two with a line PARALLEL to the long
 #      side, through the middle (the "symmetry edge") -> two sub-bounding boxes.
-#   2. For each sub-box compute an image signature (log Hu moments of the
-#      contour — a shape fingerprint) plus geometric stats (area, fill ratio).
-#   3. Compare the two halves (mirror IoU + Hu-moment shape distance + area
-#      ratio) to decide whether the tool is symmetric -> likely a single tool.
+#   2. For each sub-box compute an image signature — the |Hu moments| of the
+#      contour (magnitude only; sign is reported separately) — plus area/fill.
+#   3. Symmetry metric (simple): the two halves of one tool should have the SAME
+#      shape magnitude, so we divide them.  For the dominant moments Hu1, Hu2 and
+#      for the area we take ratio = min/max ∈ [0, 1] (1 = identical) and average:
+#          sym_score = mean(|Hu1| ratio, |Hu2| ratio, area ratio)
+#      symmetric ⇔ sym_score ≥ SYM_THRESHOLD.  Hu7's SIGN flips between mirror
+#      images, so it is shown as a supporting "mirror?" cue (kept out of the
+#      score because pixel noise makes it unreliable on its own).
 #
 # Layout per image (EXACT same style as bbox_bar_analysis.py):
 #   Left   — Tray image: outliers drawn with their split line + two sub-boxes.
-#             The enclosing box is GREEN (symmetric → single tool) or RED
-#             (asymmetric → genuinely fused), dashed.  Each sub-box's contour
-#             uses its palette colour, matching its bars and table row; a
-#             numbered circle is the fallback.
-#   Centre — One horizontal-bar subplot per signature property; one bar per
-#             sub-box.  Sub-boxes of an ASYMMETRIC outlier carry a gold band.
-#   Right  — Compact numeric table + per-outlier symmetry verdict.
+#             Enclosing box GREEN (symmetric → 1 tool) or RED (asymmetric →
+#             fused), dashed.  Each sub-box contour uses its palette colour
+#             (matches its bars/table row); numbered circle is the fallback.
+#   Centre — One horizontal-bar subplot per signature property; the two sub-boxes
+#             are GROUPED by the outlier they came from (so you compare A vs B
+#             within a group).  Asymmetric groups carry a gold band.
+#   Right  — Per-sub-box table + per-outlier symmetry score and verdict.
 #
 # Usage:
 #   cd /home/antonio/Documents/TFG-project
@@ -57,22 +62,20 @@ _ITEM_COLOURS = [
 ]
 
 # Per-sub-box signature properties shown as bars.  (key, label)
+# Hu values are shown as |Hu| on a -log10 scale (bigger bar = smaller raw moment);
+# the two halves of a symmetric tool have near-equal bars.
 _PROPERTIES = [
-    ('hu1',  'Hu 1  (log)'),
-    ('hu2',  'Hu 2  (log)'),
-    ('hu3',  'Hu 3  (log)'),
-    ('hu4',  'Hu 4  (log)'),
-    ('hu5',  'Hu 5  (log)'),
-    ('hu6',  'Hu 6  (log)'),
-    ('hu7',  'Hu 7  (log)'),
+    ('hu1m', '|Hu 1|   (-log10)'),
+    ('hu2m', '|Hu 2|   (-log10)'),
+    ('hu3m', '|Hu 3|   (-log10)'),
     ('area', 'Contour area  [px²]'),
     ('fill', 'Fill ratio  [%]'),
 ]
 
-# Symmetry verdict thresholds (a tool is "symmetric" → likely a single open
-# scissor/forceps → should NOT be split).
-_IOU_SYMMETRIC   = 0.55     # mirror-IoU at/above this ⇒ symmetric
-_SHAPE_SYMMETRIC = 0.30     # Hu shape distance at/below this ⇒ symmetric
+# A tool is "symmetric" (→ likely a single open scissor/forceps → do NOT split)
+# when the averaged half-to-half magnitude ratio reaches this.  Tune from the
+# values printed in the verdict block.
+_SYM_THRESHOLD = 0.65
 
 
 def _colour(idx: int) -> str:
@@ -83,6 +86,17 @@ def _rgb(idx: int) -> tuple[int, int, int]:
     """Palette colour as an (R, G, B) tuple (vis images are RGB, not BGR)."""
     h = _colour(idx)
     return int(h[1:3], 16), int(h[3:5], 16), int(h[5:7], 16)
+
+
+def _logmag(h: float) -> float:
+    """Absolute log-magnitude of a Hu moment: -log10(|h|), positive and comparable."""
+    return float(-np.log10(abs(h))) if h != 0 else 0.0
+
+
+def _ratio(a: float, b: float) -> float:
+    """min/max of two magnitudes ∈ [0, 1] (1 = identical).  Sign is ignored."""
+    a, b = abs(a), abs(b)
+    return (min(a, b) / max(a, b)) if max(a, b) > 0 else 0.0
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -130,37 +144,34 @@ def _deskew(binary: np.ndarray, c, long_v, short_v, long_len, short_len) -> np.n
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _signature(mask: np.ndarray) -> dict | None:
-    """Image signature (log Hu moments) + geometry of the largest blob in `mask`."""
+    """Image signature (raw Hu moments) + geometry of the largest blob in `mask`."""
     cnts, _ = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
     if not cnts:
         return None
     cnt = max(cnts, key=cv.contourArea)
     area = float(cv.contourArea(cnt))
-    hu = cv.HuMoments(cv.moments(cnt)).flatten()
-    # Log transform keeps the seven moments on a comparable, signed scale.
-    hu_log = [float(-np.sign(h) * np.log10(abs(h))) if h != 0 else 0.0 for h in hu]
+    hu = cv.HuMoments(cv.moments(cnt)).flatten()      # signed, raw
     box_area = float(mask.shape[0] * mask.shape[1])
     return {
         'contour': cnt,
         'area':    area,
         'fill':    (area / box_area * 100.0) if box_area > 0 else 0.0,
-        'hu':      hu_log,
+        'hu_raw':  hu,
     }
 
 
 def _analyse_outlier(binary: np.ndarray, bbox: tuple) -> dict:
-    """Split one outlier bbox, build per-half signatures and symmetry metrics."""
+    """Split one outlier bbox, build per-half signatures and the symmetry metric."""
     c, long_v, short_v, long_len, short_len = _bbox_axes(bbox)
     crop = _deskew(binary, c, long_v, short_v, long_len, short_len)
 
-    H = crop.shape[0]
-    h2 = H // 2
+    h2 = crop.shape[0] // 2
     top    = crop[:h2]
     bottom = crop[h2:2 * h2]                 # equal height for the mirror compare
     sig_a  = _signature(top)                 # 'A' = +short_v side
     sig_b  = _signature(bottom)              # 'B' = -short_v side
 
-    # Mirror IoU: flip the bottom half up and overlap it with the top half.
+    # Mirror IoU (secondary cross-check): flip the bottom half up, overlap on top.
     if top.size and bottom.size:
         bot_flip = np.flipud(bottom)
         inter = int(np.logical_and(top > 0, bot_flip > 0).sum())
@@ -169,25 +180,25 @@ def _analyse_outlier(binary: np.ndarray, bbox: tuple) -> dict:
     else:
         iou = 0.0
 
-    # Hu-moment shape distance + area ratio between the two halves.
     if sig_a and sig_b:
-        shape_dist = float(cv.matchShapes(sig_a['contour'], sig_b['contour'],
-                                          cv.CONTOURS_MATCH_I1, 0.0))
-        a_area, b_area = sig_a['area'], sig_b['area']
-        area_ratio = (min(a_area, b_area) / max(a_area, b_area)
-                      if max(a_area, b_area) > 0 else 0.0)
+        hua, hub = sig_a['hu_raw'], sig_b['hu_raw']
+        r1 = _ratio(hua[0], hub[0])          # |Hu1| half-to-half ratio
+        r2 = _ratio(hua[1], hub[1])          # |Hu2| ratio
+        area_ratio = _ratio(sig_a['area'], sig_b['area'])
+        sym_score = float(np.mean([r1, r2, area_ratio]))
+        # Hu7 sign flips between mirror images — a supporting cue, not the gate.
+        s7 = (int(np.sign(hua[6])), int(np.sign(hub[6])))
+        mirror7 = (s7[0] != 0 and s7[0] == -s7[1])
     else:
-        shape_dist = float('nan')
-        area_ratio = 0.0
-
-    symmetric = (iou >= _IOU_SYMMETRIC) and (
-        not np.isfinite(shape_dist) or shape_dist <= _SHAPE_SYMMETRIC)
+        r1 = r2 = area_ratio = sym_score = 0.0
+        s7, mirror7 = (0, 0), False
 
     return {
         'bbox': bbox, 'axes': (c, long_v, short_v, long_len, short_len),
         'sig_a': sig_a, 'sig_b': sig_b,
-        'iou': iou, 'shape_dist': shape_dist, 'area_ratio': area_ratio,
-        'symmetric': symmetric,
+        'r1': r1, 'r2': r2, 'area_ratio': area_ratio, 'sym_score': sym_score,
+        'iou': iou, 'hu7_signs': s7, 'mirror7': mirror7,
+        'symmetric': sym_score >= _SYM_THRESHOLD,
     }
 
 
@@ -195,12 +206,12 @@ def _record(sig: dict | None) -> dict:
     """Flatten a half signature into a bar/table record (NaNs when empty)."""
     nan = float('nan')
     if sig is None:
-        rec = {k: nan for k, _ in _PROPERTIES}
-        return rec
-    rec = {f'hu{i + 1}': sig['hu'][i] for i in range(7)}
-    rec['area'] = sig['area']
-    rec['fill'] = sig['fill']
-    return rec
+        return {k: nan for k, _ in _PROPERTIES}
+    hu = sig['hu_raw']
+    return {
+        'hu1m': _logmag(hu[0]), 'hu2m': _logmag(hu[1]), 'hu3m': _logmag(hu[2]),
+        'area': sig['area'],    'fill': sig['fill'],
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -269,27 +280,35 @@ def plot_symmetry_analysis(
     tray_img: np.ndarray,
     image_label: str | None = None,
 ) -> None:
-    """One figure: outlier sub-boxes + per-half signatures + symmetry verdict."""
+    """One figure: outlier sub-boxes + per-half |Hu| signatures + symmetry verdict."""
     outliers = [e['bbox'] for e in outlier_analysis.get('outliers', [])]
     if not outliers:
         print(f'[outlier_symmetry] {image_label or "image"}: no outlier candidates — skipping.')
         return
 
     analyses = [_analyse_outlier(seg_binary, bb) for bb in outliers]
+    K = len(analyses)
 
     # One record per sub-box (2 per outlier), in item order A,B,A,B,...
     records: list[dict] = []
-    asym_items: set[int] = set()
-    for o, an in enumerate(analyses):
+    for an in analyses:
         records.append(_record(an['sig_a']))
         records.append(_record(an['sig_b']))
-        if not an['symmetric']:
-            asym_items.update({2 * o, 2 * o + 1})
 
-    n_items = len(records)
+    # Bars are GROUPED by parent outlier: leave a gap between groups.
+    y_pos, group_spans = [], []
+    base = 0.0
+    for o in range(K):
+        y_pos += [base, base + 1.0]
+        group_spans.append((base - 0.5, base + 1.5))
+        base += 3.0                                   # 2 bars + 1 gap
+    y_pos = np.array(y_pos)
+    bar_labels = [f'{o + 1}{"AB"[k]}' for o in range(K) for k in (0, 1)]
+    colours    = [_colour(i) for i in range(2 * K)]
+    asym_groups = [o for o, an in enumerate(analyses) if not an['symmetric']]
+
     n_props = len(_PROPERTIES)
-
-    title = f'Outlier vertical-symmetry analysis — {len(outliers)} outlier(s)'
+    title = f'Outlier vertical-symmetry analysis — {K} outlier(s)'
     if image_label:
         title = f'{image_label}  ·  {title}'
 
@@ -312,26 +331,24 @@ def plot_symmetry_analysis(
     )
     ax_img.axis('off')
 
-    # ── Centre: one bar subplot per signature property ───────────────────────
+    # ── Centre: one bar subplot per property, sub-boxes grouped per outlier ───
     props_gs = gridspec.GridSpecFromSubplotSpec(n_props, 1, subplot_spec=outer_gs[1], hspace=0.55)
-    y_pos      = np.arange(n_items)
-    bar_labels = [str(i + 1) for i in range(n_items)]
-    colours    = [_colour(i) for i in range(n_items)]
-    edge_cols  = ['gold' if i in asym_items else 'none' for i in range(n_items)]
-    edge_wids  = [2.0    if i in asym_items else 0.0    for i in range(n_items)]
 
     for prop_row, (key, label) in enumerate(_PROPERTIES):
         ax = fig.add_subplot(props_gs[prop_row])
         values = np.array([rec[key] for rec in records], dtype=float)
 
-        ax.barh(y_pos, values, color=colours, edgecolor=edge_cols,
-                linewidth=edge_wids, height=0.7)
+        ax.barh(y_pos, values, color=colours, height=0.8,
+                edgecolor='#333333', linewidth=0.4)
 
+        # -log10(|Hu|) is negative when |Hu| > 1 (very elongated halves), so the
+        # x-axis must span both signs; area/fill stay positive.
         finite = values[np.isfinite(values)]
         vmin = min(0.0, float(finite.min())) if finite.size else 0.0
         vmax = max(0.0, float(finite.max())) if finite.size else 1.0
         span = (vmax - vmin) or 1.0
-        ax.axvline(0, color='#bbbbbb', linewidth=0.6, zorder=0)
+        if vmin < 0:
+            ax.axvline(0, color='#bbbbbb', linewidth=0.6, zorder=1)
         for yi, val in zip(y_pos, values):
             if np.isfinite(val):
                 fmt = f'{val:.0f}' if key == 'area' else f'{val:.2f}'
@@ -339,28 +356,36 @@ def plot_symmetry_analysis(
                         va='center', ha='left' if val >= 0 else 'right',
                         fontsize=6.5, color='#333333')
 
+        # Group bands: faint grey per outlier, gold for asymmetric ones.
+        for o, (lo, hi) in enumerate(group_spans):
+            ax.axhspan(lo, hi, facecolor='gold' if o in asym_groups else '#000000',
+                       alpha=0.10 if o in asym_groups else 0.04, zorder=0)
+
         ax.set_yticks(y_pos)
         ax.set_yticklabels(bar_labels, fontsize=7)
+        ax.invert_yaxis()                              # outlier 1 on top
         ax.set_xlabel(label, fontsize=7, labelpad=2)
         ax.tick_params(axis='x', labelsize=6)
         ax.set_xlim(vmin - span * 0.15, vmax + span * 0.35)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
-        for i in asym_items:
-            ax.axhspan(i - 0.5, i + 0.5, facecolor='gold', alpha=0.10, zorder=0)
 
-    # ── Right: numeric table + per-outlier verdict ───────────────────────────
+    # ── Right: per-sub-box table + per-outlier verdict ───────────────────────
     ax_tbl = fig.add_subplot(outer_gs[2])
     ax_tbl.axis('off')
 
-    col_labels = ['#', 'out', 'side', 'hu1', 'hu2', 'area', 'fill%']
-    tbl_data   = []
+    col_labels = ['#', 'out', 'side', '|Hu1|', '|Hu2|', 'sgn7', 'area', 'fill%']
+    tbl_data = []
     for o, an in enumerate(analyses):
-        for k, (side, rec) in enumerate((('A', records[2 * o]), ('B', records[2 * o + 1]))):
+        for k, side in enumerate(('A', 'B')):
+            rec = records[2 * o + k]
+            sig = an['sig_a'] if k == 0 else an['sig_b']
+            s7  = '+' if (sig is not None and sig['hu_raw'][6] >= 0) else '−'
             tbl_data.append([
                 str(2 * o + k + 1), str(o + 1), side,
-                f'{rec["hu1"]:.2f}' if np.isfinite(rec['hu1']) else '—',
-                f'{rec["hu2"]:.2f}' if np.isfinite(rec['hu2']) else '—',
+                f'{rec["hu1m"]:.2f}' if np.isfinite(rec['hu1m']) else '—',
+                f'{rec["hu2m"]:.2f}' if np.isfinite(rec['hu2m']) else '—',
+                s7 if sig is not None else '—',
                 f'{rec["area"]:.0f}' if np.isfinite(rec['area']) else '—',
                 f'{rec["fill"]:.1f}' if np.isfinite(rec['fill']) else '—',
             ])
@@ -370,32 +395,35 @@ def plot_symmetry_analysis(
     table.auto_set_font_size(False)
     table.set_fontsize(7.5)
     table.scale(1.0, 1.3)
-    for i in range(n_items):
-        table[i + 1, 0].set_facecolor(to_rgba(_colour(i), 0.85))
-        table[i + 1, 0].set_text_props(color='white', fontweight='bold')
-        if i in asym_items:
-            for col in range(1, len(col_labels)):
-                table[i + 1, col].set_facecolor(to_rgba('gold', 0.25))
+    for o, an in enumerate(analyses):
+        for k in (0, 1):
+            i = 2 * o + k
+            table[i + 1, 0].set_facecolor(to_rgba(_colour(i), 0.85))
+            table[i + 1, 0].set_text_props(color='white', fontweight='bold')
+            if not an['symmetric']:
+                for col in range(1, len(col_labels)):
+                    table[i + 1, col].set_facecolor(to_rgba('gold', 0.25))
     for col in range(len(col_labels)):
         table[0, col].set_facecolor('#333333')
         table[0, col].set_text_props(color='white', fontweight='bold')
-    ax_tbl.set_title('Per-sub-box signature', fontsize=8, pad=4)
+    ax_tbl.set_title('Per-sub-box |Hu| signature', fontsize=8, pad=4)
 
-    # Per-outlier verdict block under the table.
+    # Per-outlier verdict block (the simple metric + its parts).
     lines = []
     for o, an in enumerate(analyses):
         tag = 'SYMMETRIC → 1 tool' if an['symmetric'] else 'ASYMMETRIC → fused'
-        sd  = f'{an["shape_dist"]:.3f}' if np.isfinite(an['shape_dist']) else '—'
-        lines.append(f'Outlier {o + 1}: {tag}   '
-                     f'(mirror IoU {an["iou"]:.2f} · shape dist {sd} · '
-                     f'area ratio {an["area_ratio"]:.2f})')
+        mir = 'mirror' if an['mirror7'] else 'same'
+        lines.append(
+            f'Outlier {o + 1}: {tag}   sym={an["sym_score"]:.2f}  '
+            f'(|Hu1| {an["r1"]:.2f} · |Hu2| {an["r2"]:.2f} · area {an["area_ratio"]:.2f})  '
+            f'Hu7 {an["hu7_signs"][0]:+d}/{an["hu7_signs"][1]:+d} {mir} · IoU {an["iou"]:.2f}')
     ax_tbl.text(0.0, -0.02, '\n'.join(lines), transform=ax_tbl.transAxes,
                 ha='left', va='top', fontsize=8, family='monospace')
 
     fig.text(
         0.5, 0.01,
-        (f'gold = sub-boxes of an asymmetric outlier  ·  '
-         f'symmetric if mirror-IoU ≥ {_IOU_SYMMETRIC} and shape dist ≤ {_SHAPE_SYMMETRIC}'),
+        (f'gold = asymmetric outlier  ·  sym_score = mean(|Hu1| ratio, |Hu2| ratio, '
+         f'area ratio)  ·  symmetric if sym_score ≥ {_SYM_THRESHOLD}'),
         ha='center', va='bottom', fontsize=8, style='italic', color='#555555',
     )
 
