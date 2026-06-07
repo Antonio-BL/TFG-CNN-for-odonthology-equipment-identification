@@ -10,8 +10,10 @@
 #
 # Layout per image:
 #   Left   — Full tray image with every bbox drawn and numbered.
-#             Outlier bboxes are red; normal bboxes are lime.
-#             Each bbox carries a numbered circle matching the bar colours.
+#             Each bbox CONTOUR uses that bbox's palette colour, matching its
+#             bars and table row.  Outlier (fused-candidate) bboxes are drawn
+#             with a thicker DASHED contour; normal bboxes are solid.
+#             A numbered circle is kept as a fallback when colours look alike.
 #   Centre — Property strip: one horizontal-bar subplot per property, bars
 #             coloured to match the numbered markers.  Outlier bars carry a
 #             gold border and a gold background band.
@@ -136,6 +138,29 @@ def _build_per_bbox_records(
     return records, outlier_indices
 
 
+def _draw_dashed_polygon(
+    img: np.ndarray, pts: np.ndarray, colour_bgr: tuple,
+    thickness: int, dash: int = 34, gap: int = 26,
+) -> None:
+    """Draw a closed polygon with a dashed edge style (OpenCV has no native dash)."""
+    pts = np.asarray(pts, dtype=np.float32)
+    n = len(pts)
+    for i in range(n):
+        p0, p1 = pts[i], pts[(i + 1) % n]
+        seg = p1 - p0
+        length = float(np.hypot(seg[0], seg[1]))
+        if length < 1.0:
+            continue
+        unit = seg / length
+        d = 0.0
+        while d < length:
+            a = p0 + unit * d
+            b = p0 + unit * min(d + dash, length)
+            cv.line(img, (int(a[0]), int(a[1])), (int(b[0]), int(b[1])),
+                    colour_bgr, thickness, cv.LINE_AA)
+            d += dash + gap
+
+
 def _draw_tray_with_bboxes(
     tray_img: np.ndarray,
     bboxes: list[tuple],
@@ -143,28 +168,38 @@ def _draw_tray_with_bboxes(
 ) -> np.ndarray:
     """Return an RGB image with every bbox drawn and its index labelled.
 
-    Normal bboxes: lime polygon + numbered circle.
-    Outlier bboxes: red polygon + numbered circle.
+    Each bbox CONTOUR is drawn in that bbox's palette colour — the same colour as
+    its bars in the centre panel and its row in the table — so a box maps to its
+    bars at a glance.  Outlier (fused-candidate) bboxes use a thicker DASHED
+    contour to stand out; normal bboxes use a solid contour.  The numbered circle
+    is kept as a fallback for when two palette colours look similar.
     """
     vis = tray_img.copy()
-    h_img, w_img = vis.shape[:2]
 
     for i, bbox in enumerate(bboxes):
         center, size, angle = bbox[0], bbox[1], bbox[2]
         box_pts = np.int32(cv.boxPoints((center, size, angle)))
         is_outlier = i in outlier_indices
-        colour_bgr = (0, 0, 255) if is_outlier else (0, 255, 0)   # OpenCV BGR
-        cv.polylines(vis, [box_pts], isClosed=True, color=colour_bgr, thickness=6)
 
-        # Numbered circle at the bbox centre
-        cx, cy = int(center[0]), int(center[1])
+        # Contour colour = this bbox's palette colour (matches its bars / table row).
+        # vis is an RGB image (drawn via imshow), so colours must be passed in RGB
+        # order — NOT OpenCV's usual BGR, or red/blue end up swapped vs the bars.
         col_hex = _colour(i)
-        # Convert hex → BGR for OpenCV
         r = int(col_hex[1:3], 16)
         g = int(col_hex[3:5], 16)
         b = int(col_hex[5:7], 16)
+        colour_rgb = (r, g, b)
+
+        if is_outlier:
+            # Outlier candidate: thick + dashed so it is unmistakable.
+            _draw_dashed_polygon(vis, box_pts, colour_rgb, thickness=12)
+        else:
+            cv.polylines(vis, [box_pts], isClosed=True, color=colour_rgb, thickness=6)
+
+        # Numbered circle at the bbox centre (fallback disambiguation)
+        cx, cy = int(center[0]), int(center[1])
         cv.circle(vis, (cx, cy), 28, (0, 0, 0), -1)          # black halo
-        cv.circle(vis, (cx, cy), 24, (b, g, r), -1)          # colour fill
+        cv.circle(vis, (cx, cy), 24, colour_rgb, -1)         # colour fill
         cv.putText(
             vis, str(i + 1), (cx - 10, cy + 8),
             cv.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv.LINE_AA,
@@ -215,7 +250,8 @@ def plot_bbox_analysis(
     vis    = _draw_tray_with_bboxes(tray_img, bboxes, outlier_indices)
     ax_img.imshow(vis)
     ax_img.set_title(
-        f'All bboxes  ({len(outlier_indices)} outlier(s) in red)',
+        f'All bboxes  (contour colour = bar colour · '
+        f'{len(outlier_indices)} outlier(s): thick dashed)',
         fontsize=9, fontweight='bold', pad=4,
     )
     ax_img.axis('off')
@@ -362,7 +398,7 @@ if __name__ == '__main__':
     # 'all'  → every image in ./Trays (figures appear one by one; close each to advance)
     # or a specific path, e.g. './Trays/IMG_3353.jpg'
     IMAGE_PATH: str | None = None
-    IMAGE_PATH = 'all'
+    IMAGE_PATH = "/home/antonio/Documents/TFG-project/debug-utils/IMG_outlier_study2.JPG" #'all'
     if IMAGE_PATH == 'all':
         tray_root = os.path.join(os.path.dirname(__file__), '..', 'Trays3')
         tray_paths = sorted(
