@@ -89,6 +89,25 @@ Applied the same downscale-to-640 right after load_dataset (mirrors the
 build_classifier fix). This both speeds up augmentation and shrinks the in-RAM
 image list. Run with the same OMP thread caps + memory abort guard.
 
+## Sixth issue: Trays2 batch — wrong orientation + over-segmentation
+New Trays2 photos (iPhone 16) processed very wrong. Two distinct causes:
+
+1. **EXIF orientation.** Trays2 images are stored 5712x4284 (landscape) with EXIF
+   orientation=6 (viewers rotate to portrait). cv.imread ignores EXIF, so the
+   pipeline got a sideways image and cv.resize to (4284,5712) distorted it. The
+   original Trays/ were stored 4284x5712 with orientation=1. Fix (data, not code):
+   baked the orientation into the pixels with PIL `ImageOps.exif_transpose` and
+   re-saved all 23 Trays2 images upright (now 4284x5712, orientation normalised).
+
+2. **Over-segmentation (separate).** Even upright, IMG_1261 gave 25 "instruments".
+   Cause was NOT the dark margin (get_tray_crop/remove_blue_background are clean) —
+   the Sauvola adaptive binariser in segment_instruments amplifies faint cloth-edge
+   texture into ~17 tiny (<4k px) false blobs along the image borders. Real tools
+   are >=30k px (Trays2) / >=120k px (original Trays), a clear gap. Fix:
+   `seg_min_contour_area` 500 -> 10000 in config.py. Validated on 6 Trays2 images
+   (counts dropped to a realistic 4-6) and confirmed NO regression on original
+   Trays (IMG_3344 still 6 instruments, identical predictions).
+
 ## Result
 Classifier build peak RAM stays well under 1 GB. Output cached to
 `./cnn_results/classifier.joblib` (+ `class_names.json`).

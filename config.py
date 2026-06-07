@@ -79,7 +79,12 @@ class PreprocessConfig:
     seg_close_kernel_dims: tuple[int, int] = (16, 16)
     seg_sauvola_window_size: int = 51
     seg_sauvola_k: float = 0.2
-    seg_min_contour_area: int = 500
+    # Min contour area (px) to count as an instrument. Raised 500 -> 10000:
+    # adaptive Sauvola binarisation amplifies faint cloth-edge texture into many
+    # tiny (<4k px) false blobs (seen on the Trays2 batch). Real instruments are
+    # >=30k px on Trays2 and >=120k px on the original Trays, so 10k sits in a
+    # clear gap and removes the noise without dropping any real tool.
+    seg_min_contour_area: int = 10000
     seg_median_area_threshold: float = 0.2
 
     # Outlier grading weights — must sum to 1.0.
