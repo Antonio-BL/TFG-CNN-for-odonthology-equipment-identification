@@ -6,4 +6,14 @@ __pycache__/
 venv_TFG/
 
 # Training outputs / model cache
-cnn_results/
+# cnn_results/ IS tracked on purpose: metrics, confusion matrices and the small
+# joblib classifier are kept so different training runs (incl. smaller datasets)
+# can be compared and documented in the thesis.
+# Only bulky deep-net checkpoints from the fine-tuning path are ignored;
+# force-add one (git add -f) if you ever need to preserve specific weights.
+cnn_results/**/*.pt
+cnn_results/**/*.pth
+cnn_results/**/*.ckpt
+
+# Ad-hoc debug panel dumps (debug_stage.py with SAVE=True) — regenerable scratch
+debug_results/
