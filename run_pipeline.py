@@ -10,7 +10,7 @@
 #   preprocess
 #     → segment_instruments      (initial bboxes + outlier classification)
 #     → detect_concave_points    (curvature analysis on outlier bboxes)
-#     → select_best_concave_points + apply_concave_cuts
+#     → select_best_concave_points + apply_bisector_cuts
 #     → find_bboxes              (re-segmentation of the cut mask)
 #     → plot_segmentation_results (when debugging=True)
 
@@ -41,7 +41,8 @@ from pipeline.preprocess     import (
 )
 from pipeline.segmentation   import segment_instruments, find_bboxes
 from pipeline.concave_points import detect_concave_points
-from pipeline.concave_cut    import select_best_concave_points, apply_concave_cuts, _concave_grade
+from pipeline.concave_cut    import select_best_concave_points, _concave_grade
+from pipeline.bisector_cut   import apply_bisector_cuts
 from utils.visualize         import plot_segmentation_results, plot_pipeline_result
 from classifier.classify     import build_classifier, classify_crop, ToolClassifier
 from classifier.classifier_config import ClassifierConfig
@@ -89,7 +90,7 @@ def _process_image(
       2. Preprocessing: ROI crop, blue-background removal, reflection inpaint.
       3. segment_instruments: binarise, find bboxes, classify outliers.
       4. detect_concave_points: curvature analysis on outlier (fused) bboxes.
-      5. select_best_concave_points + apply_concave_cuts: cut each fused blob.
+      5. select_best_concave_points + apply_bisector_cuts: cut each fused blob.
       6. find_bboxes on the cut mask → final per-instrument bboxes.
       7. Optional: extract deskewed crops and classify each instrument.
       8. Optionally show the overview and/or classification result figures.
@@ -133,9 +134,13 @@ def _process_image(
     concave_pts = detect_concave_points(seg_binary, outlier_bboxes, cfg)
 
     # ── Concave cut + re-segmentation ────────────────────────────────────────
+    # The separation line follows the ANGLE BISECTRIX of the contour notch at the
+    # concave point (apply_bisector_cuts), not the perpendicular-to-bbox line of
+    # the legacy apply_concave_cuts — the bisector follows the real contact
+    # geometry between the two fused tools.
     if outlier_bboxes:
         best_points    = select_best_concave_points(concave_pts)
-        seg_binary_cut = apply_concave_cuts(
+        seg_binary_cut = apply_bisector_cuts(
             seg_binary, outlier_bboxes, best_points, cfg,
         )
         final_bboxes   = find_bboxes(seg_binary_cut, cfg)
